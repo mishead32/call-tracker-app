@@ -105,8 +105,15 @@ function genTestCalls(key) {
 
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
-var HEAD_SUM = ['Date', 'Caller', 'Total calls', 'Outgoing', 'Incoming', 'Missed/Rejected',
-  'Talktime (h:mm:ss)', 'First call', 'Last call ended', 'Working min (so far)', 'Idle min', 'Idle gaps', 'Longest idle (min)', 'Idle %'];
+var HEAD_SUM = ['Date', 'Caller', 'Total calls', 'Outgoing', 'Incoming', 'Missed / Rejected',
+  'Talktime (h:mm:ss)', 'Calls per hour', 'First call', 'Last call ended', 'Working min', 'Idle min',
+  'Idle gaps', 'Longest idle (min)', 'Idle %'];
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var WDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function prettyDay(key) {
+  var d = new Date(dayStartMs(key) + IST);
+  return WDAYS[d.getUTCDay()] + ' ' + pad(d.getUTCDate()) + '-' + MONTHS[d.getUTCMonth()] + '-' + d.getUTCFullYear();
+}
 
 function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
 function sheet_(name, header) {
@@ -164,29 +171,63 @@ function doPost(e) {
 function doGet() { return json_({ ok: true, msg: 'Call tracker is running' }); }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 
-/** Rebuilds the Daily Summary tab from the Call Log. Also runs automatically (see installTrigger). */
+/** Rebuilds the Daily Summary tab from the Call Log (newest day first, callers A-Z). Runs automatically too. */
 function rebuildSummary() {
   var log = sheet_('Call Log', HEAD_LOG), sum = sheet_('Daily Summary', HEAD_SUM);
   var v = log.getLastRow() > 1 ? log.getRange(2, 1, log.getLastRow() - 1, 8).getValues() : [];
   var groups = {}, days = {};
   v.forEach(function (r) {
-    var k = r[1] + '|' + r[0];
-    (groups[k] = groups[k] || []).push({ start: Number(r[7]), dur: Number(r[5]) || 0, type: r[4] });
-    days[r[1]] = 1;
+    var startMs = Number(r[7]);
+    if (!startMs) return;
+    var d = dayKey(startMs);                       // day comes from the exact timestamp, not the Date column
+    var k = d + '|' + String(r[0]).trim();
+    (groups[k] = groups[k] || []).push({ start: startMs, dur: Number(r[5]) || 0, type: String(r[4]) });
+    days[d] = 1;
   });
   var now = Date.now(); days[dayKey(now)] = 1;
-  var callers = ss_().getSheetByName('Callers').getDataRange().getValues().slice(1).map(function (r) { return r[0]; }).filter(String);
-  var out = [];
+  var callers = ss_().getSheetByName('Callers').getDataRange().getValues().slice(1)
+    .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
+
+  var out = [], bg = [], band = 0;
   Object.keys(days).sort().reverse().forEach(function (d) {
     callers.forEach(function (name) {
       var x = computeDay(groups[d + '|' + name] || [], d, now);
-      out.push([d, name, x.total, x.out, x.inc, x.missed, fmtDur(x.talkSec),
+      var perHour = x.workMin ? Math.round(10 * x.total / (x.workMin / 60)) / 10 : 0;
+      out.push([prettyDay(d), name, x.total, x.out, x.inc, x.missed, fmtDur(x.talkSec), perHour,
         x.first ? fmtTime(x.first) : '-', x.last ? fmtTime(x.last) : '-',
-        x.workMin, x.idleMin, x.gaps, x.longestMin, x.workMin ? Math.round(100 * x.idleMin / x.workMin) + '%' : '-']);
+        x.workMin, x.idleMin, x.gaps, x.longestMin, x.workMin ? x.idleMin / x.workMin : '']);
+      bg.push(HEAD_SUM.map(function () { return band % 2 ? '#f3f3f3' : '#ffffff'; }));
     });
+    band++;
   });
-  if (sum.getLastRow() > 1) sum.getRange(2, 1, sum.getLastRow() - 1, HEAD_SUM.length).clearContent();
-  if (out.length) sum.getRange(2, 1, out.length, HEAD_SUM.length).setValues(out);
+
+  var n = HEAD_SUM.length;
+  sum.getRange(1, 1, 1, n).setValues([HEAD_SUM]).setFontWeight('bold').setBackground('#d9ead3')
+    .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sum.setFrozenRows(1);
+  sum.setFrozenColumns(2);
+  var maxRows = sum.getMaxRows();
+  if (maxRows > 1) sum.getRange(2, 1, maxRows - 1, n).clear();
+  sum.clearConditionalFormatRules();
+  if (!out.length) return;
+
+  var body = sum.getRange(2, 1, out.length, n);
+  [1, 2, 7, 9, 10].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); }); // keep as plain text
+  body.setValues(out);
+  body.setBackgrounds(bg).setVerticalAlignment('middle');
+  sum.getRange(2, 3, out.length, n - 2).setHorizontalAlignment('center');
+  sum.getRange(2, 8, out.length, 1).setNumberFormat('0.0');
+  sum.getRange(2, 15, out.length, 1).setNumberFormat('0%');
+  sum.getRange(2, 1, out.length, 2).setFontWeight('bold');
+  sum.getRange(2, 1, out.length, n).setBorder(null, null, true, null, null, null, '#cccccc', SpreadsheetApp.BorderStyle.SOLID);
+
+  var idleCol = sum.getRange(2, 15, out.length, 1);
+  sum.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(0.5).setBackground('#f4cccc').setFontColor('#990000').setRanges([idleCol]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenNumberLessThanOrEqualTo(0.2).setBackground('#d9ead3').setFontColor('#274e13').setRanges([idleCol]).build()
+  ]);
+  sum.setColumnWidths(1, 1, 120); sum.setColumnWidths(2, 1, 110); sum.setColumnWidths(3, n - 2, 85);
+  sum.setRowHeight(1, 45);
 }
 
 /** TEST: fills two sample days for Amanpreet and Ashima, then builds the summary. */
