@@ -1,17 +1,23 @@
 /**
  * Telecaller Call Tracker  (Google Sheet + Apps Script)
- * - Phones send call logs to this script (doPost)
- * - Script fills "Call Log" and builds "Daily Summary" (calls, talktime, idle)
- * Idle = a gap of IDLE_MIN minutes or more with no call, inside working hours (lunch excluded).
+ * Phones send call logs here (doPost) -> "Call Log" tab -> "Daily Summary" tab.
+ *
+ * Working time = shift start to shift end, MINUS lunch and tea breaks (set per caller in the Callers tab).
+ * Productivity % = time actually on calls (inside working time) / working time.
+ * Idle = no call for IDLE_MIN minutes or more, inside working time.
  */
 
-// ---------- SETTINGS (change here) ----------
+// ---------- DEFAULT SETTINGS (a caller's own cells in the Callers tab override these) ----------
 var CFG = {
   SHIFT_START: '09:00',
   SHIFT_END: '18:00',
   LUNCH_START: '13:10',
   LUNCH_END: '13:50',
-  IDLE_MIN: 10
+  TEA_START: '16:00',     // 20-minute tea break (change here or per caller)
+  TEA_END: '16:20',
+  IDLE_MIN: 10,           // gap with no call that counts as idle
+  PROD_GOOD: 0.40,        // productivity at or above this = green
+  PROD_LOW: 0.20          // productivity below this = red
 };
 var IST = 330 * 60000; // India time = UTC + 5:30
 
@@ -26,31 +32,77 @@ function dayStartMs(key) {
   return Date.UTC(+p[0], +p[1] - 1, +p[2]) - IST;
 }
 function hmMs(s) { var p = s.split(':'); return (+p[0] * 60 + +p[1]) * 60000; }
-function fmtTime(ms) {
+function fmtTime(ms) {               // HH:MM
   var d = new Date(ms + IST);
   return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
 }
-function fmtDur(sec) {
-  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  return h + ':' + pad(m) + ':' + pad(s);
+function fmtTimeS(ms) {              // HH:MM:SS
+  var d = new Date(ms + IST);
+  return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+}
+function fmtHMS(ms) {                // duration -> HH:MM:SS (hours can pass 24)
+  var t = Math.round(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  return pad(h) + ':' + pad(m) + ':' + pad(s);
+}
+/** "9:00", "09:00", "9:00 AM", "6:00 PM", "18:00:00" -> "HH:MM". Blank -> fallback. "-"/"none" -> null (no such break). */
+function parseHM(v, fb) {
+  var s = String(v == null ? '' : v).trim().toUpperCase();
+  if (!s) return fb;
+  if (s === '-' || s === 'NONE' || s === 'NO') return null;
+  var m = s.match(/^(\d{1,2})[:.](\d{2})(?::\d{2})?\s*(AM|PM)?$/);
+  if (!m) return fb;
+  var h = +m[1], mi = +m[2];
+  if (m[3] === 'PM' && h < 12) h += 12;
+  if (m[3] === 'AM' && h === 12) h = 0;
+  if (h > 23 || mi > 59) return fb;
+  return pad(h) + ':' + pad(mi);
+}
+/** Callers-tab row (as displayed text) -> shift object. Columns E..J = start, end, lunch from/to, tea from/to. */
+function shiftFromRow(r) {
+  var breaks = [];
+  var ls = parseHM(r[6], CFG.LUNCH_START), le = parseHM(r[7], CFG.LUNCH_END);
+  var ts = parseHM(r[8], CFG.TEA_START), te = parseHM(r[9], CFG.TEA_END);
+  if (ls && le) breaks.push([ls, le]);
+  if (ts && te) breaks.push([ts, te]);
+  return {
+    start: parseHM(r[4], CFG.SHIFT_START) || CFG.SHIFT_START,
+    end: parseHM(r[5], CFG.SHIFT_END) || CFG.SHIFT_END,
+    breaks: breaks
+  };
+}
+function defaultShift() {
+  return { start: CFG.SHIFT_START, end: CFG.SHIFT_END, breaks: [[CFG.LUNCH_START, CFG.LUNCH_END], [CFG.TEA_START, CFG.TEA_END]] };
+}
+/** Working segments of a day: shift window minus breaks. */
+function buildSegments(key, shift) {
+  var base = dayStartMs(key);
+  var s = base + hmMs(shift.start), e = base + hmMs(shift.end);
+  var cuts = (shift.breaks || []).map(function (b) { return [base + hmMs(b[0]), base + hmMs(b[1])]; })
+    .filter(function (b) { return b[1] > b[0]; }).sort(function (a, b) { return a[0] - b[0]; });
+  var segs = [], cur = s;
+  cuts.forEach(function (b) {
+    var bs = Math.max(b[0], s), be = Math.min(b[1], e);
+    if (be <= bs) return;
+    if (bs > cur) segs.push([cur, bs]);
+    cur = Math.max(cur, be);
+  });
+  if (e > cur) segs.push([cur, e]);
+  return segs;
 }
 
-/** calls: [{start(ms), dur(sec), type}] for ONE caller on ONE day. nowMs: cut-off for today. */
-function computeDay(calls, key, nowMs) {
-  var base = dayStartMs(key);
-  var segs = [
-    [base + hmMs(CFG.SHIFT_START), base + hmMs(CFG.LUNCH_START)],
-    [base + hmMs(CFG.LUNCH_END), base + hmMs(CFG.SHIFT_END)]
-  ];
+/** calls: [{start(ms), dur(sec), type}] for ONE caller on ONE day. nowMs cuts off today's working time. */
+function computeDay(calls, key, nowMs, shift) {
+  shift = shift || defaultShift();
+  var fullSegs = buildSegments(key, shift);
   var busy = calls.filter(function (c) { return c.dur > 0; })
     .map(function (c) { return [c.start, c.start + c.dur * 1000]; })
     .sort(function (a, b) { return a[0] - b[0]; });
 
-  var idleMs = 0, gaps = 0, longest = 0, workMs = 0, thr = CFG.IDLE_MIN * 60000;
+  var idleMs = 0, gaps = 0, longest = 0, workMs = 0, talkMs = 0, thr = CFG.IDLE_MIN * 60000;
   function gap(len) {
     if (len >= thr) { idleMs += len; gaps++; if (len > longest) longest = len; }
   }
-  segs.forEach(function (seg) {
+  fullSegs.forEach(function (seg) {
     var s = seg[0], e = Math.min(seg[1], nowMs);
     if (e <= s) return;
     workMs += e - s;
@@ -58,27 +110,28 @@ function computeDay(calls, key, nowMs) {
     busy.forEach(function (b) {
       var bs = Math.max(b[0], s), be = Math.min(b[1], e);
       if (be <= bs) return;
+      talkMs += be - bs;
       if (bs > cur) gap(bs - cur);
       cur = Math.max(cur, be);
     });
     if (e > cur) gap(e - cur);
   });
 
-  var out = 0, inc = 0, missed = 0, talk = 0, first = null, last = null;
+  var out = 0, inc = 0, missed = 0, outside = 0, first = null, last = null;
   calls.forEach(function (c) {
     if (c.type === 'OUTGOING') out++;
     else if (c.type === 'INCOMING') inc++;
-    else missed++;                       // MISSED / REJECTED
-    talk += c.dur;
+    else missed++;                                  // MISSED / REJECTED
+    var inside = fullSegs.some(function (g) { return c.start >= g[0] && c.start < g[1]; });
+    if (!inside) outside++;
     if (first === null || c.start < first) first = c.start;
     var end = c.start + c.dur * 1000;
     if (last === null || end > last) last = end;
   });
   return {
-    total: calls.length, out: out, inc: inc, missed: missed, talkSec: talk,
+    total: calls.length, out: out, inc: inc, missed: missed, outside: outside,
     first: first, last: last,
-    idleMin: Math.round(idleMs / 60000), gaps: gaps, longestMin: Math.round(longest / 60000),
-    workMin: Math.round(workMs / 60000)
+    workMs: workMs, talkMs: talkMs, idleMs: idleMs, gaps: gaps, longestMs: longest
   };
 }
 
@@ -87,16 +140,14 @@ function genTestCalls(key) {
   var base = dayStartMs(key);
   function t(hhmm) { return base + hmMs(hhmm); }
   var A = [], S = [];
-  // Amanpreet: a call every ~6-8 minutes all day, 2-3 min each
   var tm = t('09:05'), i = 0, lunchS = t(CFG.LUNCH_START), lunchE = t(CFG.LUNCH_END), end = t('17:55');
   while (tm < end) {
     if (tm >= lunchS && tm < lunchE) { tm = lunchE + 120000; continue; }
     A.push({ start: tm, dur: 120 + (i * 37) % 120, type: i % 5 === 4 ? 'INCOMING' : 'OUTGOING' });
     tm += (6 + (i * 3) % 3) * 60000 + 60000 * 2; i++;
   }
-  // Ashima: bursts of calls, then long gaps
   [['09:10', 3], ['09:14', 2], ['09:19', 4], ['10:05', 3], ['10:09', 5], ['11:40', 2], ['11:44', 3],
-   ['11:50', 2], ['14:30', 4], ['14:34', 3], ['14:40', 2], ['16:20', 3], ['16:25', 4], ['17:10', 2]]
+   ['11:50', 2], ['14:30', 4], ['14:34', 3], ['14:40', 2], ['16:30', 3], ['16:35', 4], ['17:10', 2]]
     .forEach(function (r, j) {
       S.push({ start: t(r[0]), dur: j === 6 ? 0 : r[1] * 60, type: j === 6 ? 'MISSED' : (j % 4 === 3 ? 'INCOMING' : 'OUTGOING') });
     });
@@ -105,15 +156,27 @@ function genTestCalls(key) {
 
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
-var HEAD_SUM = ['Date', 'Caller', 'Total calls', 'Outgoing', 'Incoming', 'Missed / Rejected',
-  'Talktime (h:mm:ss)', 'Calls per hour', 'First call', 'Last call ended', 'Working min', 'Idle min',
-  'Idle gaps', 'Longest idle (min)', 'Idle %'];
-var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-var WDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-function prettyDay(key) {
-  var d = new Date(dayStartMs(key) + IST);
-  return WDAYS[d.getUTCDay()] + ' ' + pad(d.getUTCDate()) + '-' + MONTHS[d.getUTCMonth()] + '-' + d.getUTCFullYear();
-}
+var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secret)',
+  'Shift start', 'Shift end', 'Lunch from', 'Lunch to', 'Tea from', 'Tea to'];
+var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
+  'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside working hours',
+  'Calls per working hour', 'Working time (excl. breaks)', 'Time on calls', 'Productivity %',
+  'Idle time (no call for 10+ min)', 'No. of idle stretches', 'Longest idle stretch',
+  'First call', 'Last call ended'];
+var NOTES_SUM = [
+  'Day of the calls.', 'Telecaller name (Callers tab).', 'Company / vertical (Callers tab).',
+  'Shift start to shift end for this caller (set in the Callers tab).',
+  'All calls in the phone call log that day.', 'Calls the caller dialled.', 'Calls the caller received and answered.',
+  'Calls that rang but were not answered, or were declined.',
+  'Calls that started before shift start, after shift end, or during lunch/tea break.',
+  'Calls made inside working time divided by working hours.',
+  'Shift length minus lunch and tea breaks. Today: only up to the current time.',
+  'Time actually spent talking on calls, inside working time (hh:mm:ss).',
+  'Time on calls divided by working time. Green = good, red = low.',
+  'Total time inside working hours with no call for 10 minutes or more.',
+  'How many separate times the caller was idle (no call for 10+ minutes).',
+  'The single longest period with no call.',
+  'Start time of the first call of the day.', 'Time the last call of the day ended.'];
 
 function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
 function sheet_(name, header) {
@@ -124,14 +187,18 @@ function sheet_(name, header) {
   }
   return sh;
 }
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var WDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function prettyDay(key) {
+  var d = new Date(dayStartMs(key) + IST);
+  return WDAYS[d.getUTCDay()] + ' ' + pad(d.getUTCDate()) + '-' + MONTHS[d.getUTCMonth()] + '-' + d.getUTCFullYear();
+}
 
-/** Run this ONCE. Creates the tabs and adds two callers. */
+/** Run this ONCE. Creates the tabs and adds two test callers. */
 function setup() {
   var c = ss_().getSheetByName('Callers') || ss_().insertSheet('Callers');
   if (c.getLastRow() === 0) {
-    c.getRange(1, 1, 1, 4).setValues([['Caller', 'Phone number', 'Vertical', 'Token (secret)']])
-      .setFontWeight('bold').setBackground('#d9ead3');
-    c.setFrozenRows(1);
+    c.getRange(1, 1, 1, 4).setValues([HEAD_CALLERS.slice(0, 4)]);
     c.getRange(2, 1, 2, 4).setValues([
       ['Amanpreet', '', 'Test', Utilities.getUuid().slice(0, 8)],
       ['Ashima', '', 'Test', Utilities.getUuid().slice(0, 8)]
@@ -139,7 +206,30 @@ function setup() {
   }
   sheet_('Call Log', HEAD_LOG);
   sheet_('Daily Summary', HEAD_SUM);
-  SpreadsheetApp.getUi().alert('Setup done. Tabs created: Callers, Call Log, Daily Summary.');
+  updateCallersTab();
+  SpreadsheetApp.getUi().alert('Setup done. Tabs: Callers, Call Log, Daily Summary.');
+}
+
+/** Adds the shift / break columns to the Callers tab and fills blanks with the default times. Safe to run again. */
+function updateCallersTab() {
+  var c = ss_().getSheetByName('Callers');
+  var n = HEAD_CALLERS.length;
+  c.getRange(1, 1, 1, n).setValues([HEAD_CALLERS]).setFontWeight('bold').setBackground('#d9ead3')
+    .setWrap(true).setHorizontalAlignment('center');
+  c.setFrozenRows(1);
+  var last = Math.max(c.getLastRow(), 2);
+  c.getRange(2, 5, 200, 6).setNumberFormat('@');                       // keep times as plain text like 09:00
+  var vals = c.getRange(2, 1, last - 1, n).getDisplayValues();
+  var def = [CFG.SHIFT_START, CFG.SHIFT_END, CFG.LUNCH_START, CFG.LUNCH_END, CFG.TEA_START, CFG.TEA_END];
+  var fill = vals.map(function (r) {
+    return def.map(function (d, i) { return r[0] && !String(r[4 + i]).trim() ? d : r[4 + i]; });
+  });
+  c.getRange(2, 5, fill.length, 6).setValues(fill);
+  c.getRange(1, 5, 1, 6).setNotes([['Shift start time, e.g. 09:00', 'Shift end time, e.g. 18:00',
+    'Lunch break start, e.g. 13:10', 'Lunch break end, e.g. 14:10',
+    'Tea break start, e.g. 16:00. Type - if none', 'Tea break end, e.g. 16:20']]);
+  c.setColumnWidths(5, 6, 80);
+  c.getRange(2, 5, 200, 6).setHorizontalAlignment('center');
 }
 
 function tokenMap_() {
@@ -162,7 +252,7 @@ function doPost(e) {
     (body.calls || []).forEach(function (c) {
       var key = caller + '|' + c.time + '|' + c.number;
       if (existing[key]) return;
-      rows.push([caller, dayKey(c.time), fmtTime(c.time), c.number, c.type, c.duration, key, c.time]);
+      rows.push([caller, dayKey(c.time), fmtTimeS(c.time), c.number, c.type, c.duration, key, c.time]);
     });
     if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD_LOG.length).setValues(rows);
     return json_({ ok: true, added: rows.length });
@@ -171,63 +261,83 @@ function doPost(e) {
 function doGet() { return json_({ ok: true, msg: 'Call tracker is running' }); }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 
-/** Rebuilds the Daily Summary tab from the Call Log (newest day first, callers A-Z). Runs automatically too. */
+/** Rebuilds Daily Summary (newest day first, callers A-Z). Also tidies Date/Time in Call Log to dd-Mon-yyyy and hh:mm:ss. */
 function rebuildSummary() {
   var log = sheet_('Call Log', HEAD_LOG), sum = sheet_('Daily Summary', HEAD_SUM);
   var v = log.getLastRow() > 1 ? log.getRange(2, 1, log.getLastRow() - 1, 8).getValues() : [];
+
+  // tidy Call Log date + time columns from the exact timestamp
+  if (v.length) {
+    var bc = v.map(function (r) {
+      var ms = Number(r[7]);
+      return ms ? [prettyDay(dayKey(ms)), fmtTimeS(ms)] : [r[1], r[2]];
+    });
+    var tr = log.getRange(2, 2, v.length, 2);
+    tr.setNumberFormat('@'); tr.setValues(bc);
+  }
+
   var groups = {}, days = {};
   v.forEach(function (r) {
     var startMs = Number(r[7]);
     if (!startMs) return;
-    var d = dayKey(startMs);                       // day comes from the exact timestamp, not the Date column
+    var d = dayKey(startMs);
     var k = d + '|' + String(r[0]).trim();
     (groups[k] = groups[k] || []).push({ start: startMs, dur: Number(r[5]) || 0, type: String(r[4]) });
     days[d] = 1;
   });
   var now = Date.now(); days[dayKey(now)] = 1;
-  var callers = ss_().getSheetByName('Callers').getDataRange().getValues().slice(1)
-    .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
+
+  var callerRows = ss_().getSheetByName('Callers').getDataRange().getDisplayValues().slice(1)
+    .filter(function (r) { return String(r[0]).trim(); })
+    .sort(function (a, b) { return String(a[0]).trim() < String(b[0]).trim() ? -1 : 1; });
 
   var out = [], bg = [], band = 0;
   Object.keys(days).sort().reverse().forEach(function (d) {
-    callers.forEach(function (name) {
-      var x = computeDay(groups[d + '|' + name] || [], d, now);
-      var perHour = x.workMin ? Math.round(10 * x.total / (x.workMin / 60)) / 10 : 0;
-      out.push([prettyDay(d), name, x.total, x.out, x.inc, x.missed, fmtDur(x.talkSec), perHour,
-        x.first ? fmtTime(x.first) : '-', x.last ? fmtTime(x.last) : '-',
-        x.workMin, x.idleMin, x.gaps, x.longestMin, x.workMin ? x.idleMin / x.workMin : '']);
+    callerRows.forEach(function (cr) {
+      var name = String(cr[0]).trim(), shift = shiftFromRow(cr);
+      var x = computeDay(groups[d + '|' + name] || [], d, now, shift);
+      var hrs = x.workMs / 3600000;
+      out.push([prettyDay(d), name, cr[2], shift.start + ' to ' + shift.end,
+        x.total, x.out, x.inc, x.missed, x.outside,
+        hrs ? Math.round(10 * (x.total - x.outside) / hrs) / 10 : 0,
+        fmtHMS(x.workMs), fmtHMS(x.talkMs), x.workMs ? x.talkMs / x.workMs : '',
+        fmtHMS(x.idleMs), x.gaps, fmtHMS(x.longestMs),
+        x.first ? fmtTimeS(x.first) : '-', x.last ? fmtTimeS(x.last) : '-']);
       bg.push(HEAD_SUM.map(function () { return band % 2 ? '#f3f3f3' : '#ffffff'; }));
     });
     band++;
   });
 
   var n = HEAD_SUM.length;
+  var maxRows = sum.getMaxRows();
+  if (sum.getMaxColumns() < n) sum.insertColumnsAfter(sum.getMaxColumns(), n - sum.getMaxColumns());
+  sum.getRange(1, 1, maxRows, Math.max(n, sum.getMaxColumns())).clear();
+  sum.clearConditionalFormatRules();
   sum.getRange(1, 1, 1, n).setValues([HEAD_SUM]).setFontWeight('bold').setBackground('#d9ead3')
     .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sum.getRange(1, 1, 1, n).setNotes([NOTES_SUM]);
   sum.setFrozenRows(1);
   sum.setFrozenColumns(2);
-  var maxRows = sum.getMaxRows();
-  if (maxRows > 1) sum.getRange(2, 1, maxRows - 1, n).clear();
-  sum.clearConditionalFormatRules();
   if (!out.length) return;
 
   var body = sum.getRange(2, 1, out.length, n);
-  [1, 2, 7, 9, 10].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); }); // keep as plain text
+  [1, 2, 3, 4, 11, 12, 14, 16, 17, 18].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); });
   body.setValues(out);
   body.setBackgrounds(bg).setVerticalAlignment('middle');
-  sum.getRange(2, 3, out.length, n - 2).setHorizontalAlignment('center');
-  sum.getRange(2, 8, out.length, 1).setNumberFormat('0.0');
-  sum.getRange(2, 15, out.length, 1).setNumberFormat('0%');
+  sum.getRange(2, 5, out.length, n - 4).setHorizontalAlignment('center');
+  sum.getRange(2, 10, out.length, 1).setNumberFormat('0.0');
+  sum.getRange(2, 13, out.length, 1).setNumberFormat('0%');
   sum.getRange(2, 1, out.length, 2).setFontWeight('bold');
   sum.getRange(2, 1, out.length, n).setBorder(null, null, true, null, null, null, '#cccccc', SpreadsheetApp.BorderStyle.SOLID);
 
-  var idleCol = sum.getRange(2, 15, out.length, 1);
+  var prod = sum.getRange(2, 13, out.length, 1);
   sum.setConditionalFormatRules([
-    SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(0.5).setBackground('#f4cccc').setFontColor('#990000').setRanges([idleCol]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenNumberLessThanOrEqualTo(0.2).setBackground('#d9ead3').setFontColor('#274e13').setRanges([idleCol]).build()
+    SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(CFG.PROD_GOOD).setBackground('#d9ead3').setFontColor('#274e13').setRanges([prod]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenNumberLessThan(CFG.PROD_LOW).setBackground('#f4cccc').setFontColor('#990000').setRanges([prod]).build()
   ]);
-  sum.setColumnWidths(1, 1, 120); sum.setColumnWidths(2, 1, 110); sum.setColumnWidths(3, n - 2, 85);
-  sum.setRowHeight(1, 45);
+  sum.setColumnWidths(1, 1, 120); sum.setColumnWidths(2, 1, 100); sum.setColumnWidths(3, 1, 100);
+  sum.setColumnWidths(4, 1, 105); sum.setColumnWidths(5, n - 4, 95);
+  sum.setRowHeight(1, 60);
 }
 
 /** TEST: fills two sample days for Amanpreet and Ashima, then builds the summary. */
@@ -237,7 +347,7 @@ function addTestData() {
     var t = genTestCalls(d);
     Object.keys(t).forEach(function (name) {
       t[name].forEach(function (c, i) {
-        rows.push([name, d, fmtTime(c.start), '98' + (10000000 + i * 7919 % 89999999), c.type, c.dur, 'TEST|' + name + '|' + c.start, c.start]);
+        rows.push([name, d, fmtTimeS(c.start), '98' + (10000000 + i * 7919 % 89999999), c.type, c.dur, 'TEST|' + name + '|' + c.start, c.start]);
       });
     });
   });
@@ -257,5 +367,6 @@ function onOpen() {
     .addItem('2. Add test data', 'addTestData')
     .addItem('3. Rebuild summary now', 'rebuildSummary')
     .addItem('4. Auto-refresh every 10 min', 'installTrigger')
+    .addItem('5. Update Callers tab (shift & breaks)', 'updateCallersTab')
     .addToUi();
 }
