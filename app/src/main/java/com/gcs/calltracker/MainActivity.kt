@@ -2,8 +2,11 @@ package com.gcs.calltracker
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
@@ -18,85 +21,181 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+/**
+ * Two screens:
+ *  1. Admin setup (only when the phone is not yet connected): URL + admin ID + admin password, then pick the caller.
+ *     The caller's secret token is fetched by the app and is never shown.
+ *  2. Status screen (after setup): shows only "Connected as <name>" and the last result. No URL, no token.
+ */
 class MainActivity : Activity() {
 
-    private lateinit var status: TextView
+    private lateinit var prefs: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("ct", Context.MODE_PRIVATE)
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        prefs = getSharedPreferences("ct", Context.MODE_PRIVATE)
+        render()
+    }
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-        }
-        fun text(s: String, size: Float = 15f) = TextView(this).apply { text = s; textSize = size; setPadding(0, pad / 2, 0, pad / 4) }
+    override fun onResume() {
+        super.onResume()
+        if (prefs.getBoolean("enrolled", false)) render()
+    }
 
-        root.addView(text("Call Tracker", 22f))
-        root.addView(text("Sends only call time, number, direction and duration to your company Sheet. No call audio."))
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        render()
+    }
 
-        root.addView(text("Web App URL (from your manager)"))
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun label(s: String, size: Float = 15f) = TextView(this).apply {
+        text = s; textSize = size; setPadding(0, dp(8), 0, dp(4))
+    }
+
+    private fun show(root: LinearLayout) {
+        setContentView(ScrollView(this).apply {
+            addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        })
+    }
+
+    private fun newRoot() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+    }
+
+    private fun render() {
+        if (prefs.getBoolean("enrolled", false)) statusScreen() else setupScreen()
+    }
+
+    // ---------------- Screen 1: admin setup ----------------
+    private fun setupScreen() {
+        val root = newRoot()
+        root.addView(label("Call Tracker - Admin setup", 22f))
+        root.addView(label("This phone is not connected yet. Only the manager can set it up."))
+
+        root.addView(label("Web App URL"))
         val urlBox = EditText(this).apply {
-            setText(prefs.getString("url", ""))
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             hint = "https://script.google.com/macros/s/.../exec"
         }
         root.addView(urlBox)
 
-        root.addView(text("Secret token (your name's token)"))
-        val tokenBox = EditText(this).apply {
-            setText(prefs.getString("token", ""))
-            hint = "e.g. a1b2c3d4"
-            inputType = InputType.TYPE_CLASS_TEXT
-        }
-        root.addView(tokenBox)
+        root.addView(label("Admin ID"))
+        val idBox = EditText(this).apply { inputType = InputType.TYPE_CLASS_TEXT; hint = "Admin ID" }
+        root.addView(idBox)
 
-        val save = Button(this).apply { text = "1. Save and allow call log" }
-        save.setOnClickListener {
-            prefs.edit().putString("url", urlBox.text.toString().trim()).putString("token", tokenBox.text.toString().trim()).apply()
-            requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1)
-            schedule()
-            refresh()
+        root.addView(label("Admin password"))
+        val pwBox = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Admin password"
         }
-        root.addView(save)
+        root.addView(pwBox)
 
-        val sync = Button(this).apply { text = "2. Send calls now (test)" }
-        sync.setOnClickListener {
-            status.text = "Sending..."
+        val msg = label("")
+        val connect = Button(this).apply { text = "Connect (admin only)" }
+        connect.setOnClickListener {
+            val url = urlBox.text.toString().trim()
+            val id = idBox.text.toString().trim()
+            val pw = pwBox.text.toString()
+            if (url.isEmpty() || id.isEmpty() || pw.isEmpty()) { msg.text = "Fill all three boxes."; return@setOnClickListener }
+            msg.text = "Checking..."
             Thread {
-                val r = Syncer.run(applicationContext)
-                runOnUiThread { status.text = r }
+                val reply = Syncer.post(url, JSONObject().put("action", "login").put("adminId", id).put("adminPass", pw).toString())
+                val j = parse(reply)
+                runOnUiThread {
+                    when {
+                        reply == null -> msg.text = "Could not reach the Sheet. Check the URL and internet."
+                        j == null -> msg.text = "The Sheet did not accept the request. Check the URL and that the web app access is set to Anyone."
+                        !j.optBoolean("ok") -> msg.text = j.optString("msg", "Not allowed.")
+                        else -> {
+                            val arr = j.optJSONArray("callers")
+                            val names = Array(arr?.length() ?: 0) { arr!!.getString(it) }
+                            if (names.isEmpty()) {
+                                msg.text = "No callers with a token found in the Callers tab."
+                            } else {
+                                msg.text = ""
+                                AlertDialog.Builder(this)
+                                    .setTitle("Whose phone is this?")
+                                    .setItems(names) { _, which -> enroll(url, id, pw, names[which], msg) }
+                                    .setNegativeButton("Cancel", null)
+                                    .show()
+                            }
+                        }
+                    }
+                }
             }.start()
         }
-        root.addView(sync)
+        root.addView(connect)
+        root.addView(msg)
+        show(root)
+    }
 
-        val battery = Button(this).apply { text = "3. Battery: set to Unrestricted" }
-        battery.setOnClickListener {
-            try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e: Exception) {}
+    private fun enroll(url: String, id: String, pw: String, caller: String, msg: TextView) {
+        msg.text = "Connecting $caller..."
+        Thread {
+            val reply = Syncer.post(url, JSONObject().put("action", "enroll").put("adminId", id).put("adminPass", pw).put("caller", caller).toString())
+            val j = parse(reply)
+            runOnUiThread {
+                if (j == null || !j.optBoolean("ok")) {
+                    msg.text = j?.optString("msg", "Could not connect.") ?: "Could not connect. Try again."
+                } else {
+                    prefs.edit()
+                        .putString("url", url)
+                        .putString("token", j.getString("token"))
+                        .putString("caller", caller)
+                        .putBoolean("enrolled", true)
+                        .apply()
+                    schedule()
+                    requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1)
+                    Thread { Syncer.run(applicationContext); runOnUiThread { render() } }.start()
+                    render()
+                }
+            }
+        }.start()
+    }
+
+    private fun parse(s: String?): JSONObject? = try { if (s == null) null else JSONObject(s) } catch (e: Exception) { null }
+
+    // ---------------- Screen 2: status only ----------------
+    private fun statusScreen() {
+        val root = newRoot()
+        root.addView(label("Call Tracker", 22f))
+        root.addView(label("Connected as: ${prefs.getString("caller", "")}", 18f))
+        root.addView(label("Your manager can see your call time, number, direction and duration. Call audio and messages are never recorded."))
+
+        val granted = checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            root.addView(label("Call log permission is OFF. Calls cannot be tracked until you allow it."))
+            root.addView(Button(this).apply {
+                text = "Allow call log"
+                setOnClickListener { requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1) }
+            })
         }
-        root.addView(battery)
 
-        status = text("")
-        root.addView(status)
-        root.addView(text("After step 3, find Call Tracker in the list and choose Don't optimize / Unrestricted, so it keeps sending in the background every 15 minutes."))
-
-        setContentView(ScrollView(this).apply {
-            addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val status = label("Last result: " + prefs.getString("status", "nothing sent yet"))
+        root.addView(Button(this).apply {
+            text = "Send calls now"
+            setOnClickListener {
+                status.text = "Sending..."
+                Thread {
+                    val r = Syncer.run(applicationContext)
+                    runOnUiThread { status.text = "Last result: $r" }
+                }.start()
+            }
         })
-        schedule()
-        refresh()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refresh()
-    }
-
-    private fun refresh() {
-        status.text = "Last result: " + getSharedPreferences("ct", Context.MODE_PRIVATE).getString("status", "nothing sent yet")
+        root.addView(Button(this).apply {
+            text = "Battery: set to Unrestricted"
+            setOnClickListener {
+                try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e: Exception) {}
+            }
+        })
+        root.addView(status)
+        root.addView(label("Please keep this app installed and the call log permission allowed. The app sends automatically every 15 minutes."))
+        show(root)
     }
 
     private fun schedule() {

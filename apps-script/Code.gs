@@ -17,7 +17,8 @@ var CFG = {
   TEA_END: '16:20',
   IDLE_MIN: 10,           // gap with no call that counts as idle
   PROD_GOOD: 0.40,        // productivity at or above this = green
-  PROD_LOW: 0.20          // productivity below this = red
+  PROD_LOW: 0.20,         // productivity below this = red
+  CONNECT_MIN: 60         // phone not heard from for this many minutes = NOT CONNECTED
 };
 var IST = 330 * 60000; // India time = UTC + 5:30
 
@@ -157,7 +158,8 @@ function genTestCalls(key) {
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
 var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secret)',
-  'Shift start', 'Shift end', 'Lunch from', 'Lunch to', 'Tea from', 'Tea to'];
+  'Shift start', 'Shift end', 'Lunch from', 'Lunch to', 'Tea from', 'Tea to',
+  'App status', 'Last seen', 'LastSeenMs (auto)', 'Call log permission (auto)', 'App version (auto)'];
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
   'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside working hours',
   'Calls per working hour', 'Working time (excl. breaks)', 'Time on calls', 'Productivity %',
@@ -230,6 +232,10 @@ function updateCallersTab() {
     'Tea break start, e.g. 16:00. Type - if none', 'Tea break end, e.g. 16:20']]);
   c.setColumnWidths(5, 6, 80);
   c.getRange(2, 5, 200, 6).setHorizontalAlignment('center');
+  c.setColumnWidths(11, 1, 230); c.setColumnWidths(12, 1, 140);
+  c.hideColumns(13);
+  c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = app deleted, phone off, or no internet.',
+    'Last time the phone contacted the Sheet.', 'Automatic - do not edit.', 'Automatic - OFF means the caller switched off call log permission.', 'Automatic.']]);
 }
 
 function tokenMap_() {
@@ -238,31 +244,109 @@ function tokenMap_() {
   return m;
 }
 
-/** Phones POST here: {token, calls:[{time(ms), number, type, duration(sec)}]} */
+/** Phones POST here. action = login | enroll (admin only) | sync (default, with caller token). */
 function doPost(e) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var body = JSON.parse(e.postData.contents);
-    var caller = tokenMap_()[String(body.token || '').trim()];
-    if (!caller) return json_({ ok: false, error: 'bad token' });
-    var sh = sheet_('Call Log', HEAD_LOG);
-    var existing = {};
-    if (sh.getLastRow() > 1) sh.getRange(2, 7, sh.getLastRow() - 1, 1).getValues().forEach(function (r) { existing[r[0]] = 1; });
-    var rows = [];
-    (body.calls || []).forEach(function (c) {
-      var key = caller + '|' + c.time + '|' + c.number;
-      if (existing[key]) return;
-      rows.push([caller, dayKey(c.time), fmtTimeS(c.time), c.number, c.type, c.duration, key, c.time]);
-    });
-    if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD_LOG.length).setValues(rows);
-    return json_({ ok: true, added: rows.length });
+    var action = body.action || 'sync';
+    if (action === 'login' || action === 'enroll') return adminAction_(action, body);
+    return syncAction_(body);
+  } catch (err) {
+    return json_({ ok: false, error: 'bad request' });
   } finally { lock.releaseLock(); }
+}
+
+function syncAction_(body) {
+  var token = String(body.token || '').trim();
+  var c = ss_().getSheetByName('Callers'), cv = c.getDataRange().getValues(), rowIdx = -1, caller = '';
+  for (var i = 1; i < cv.length; i++) if (token && String(cv[i][3]).trim() === token) { rowIdx = i + 1; caller = cv[i][0]; break; }
+  if (rowIdx < 0) return json_({ ok: false, error: 'bad token' });
+
+  var sh = sheet_('Call Log', HEAD_LOG);
+  var existing = {};
+  if (sh.getLastRow() > 1) sh.getRange(2, 7, sh.getLastRow() - 1, 1).getValues().forEach(function (r) { existing[r[0]] = 1; });
+  var rows = [];
+  (body.calls || []).forEach(function (x) {
+    var key = caller + '|' + x.time + '|' + x.number;
+    if (existing[key]) return;
+    rows.push([caller, dayKey(x.time), fmtTimeS(x.time), x.number, x.type, x.duration, key, x.time]);
+  });
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD_LOG.length).setValues(rows);
+
+  // heartbeat: proves the app is installed and running on this caller's phone
+  c.getRange(rowIdx, 13, 1, 3).setValues([[Date.now(), body.perm === false ? 'OFF' : 'OK', String(body.ver || '')]]);
+  return json_({ ok: true, added: rows.length });
+}
+
+// ----- Admin login (ID + password are stored only as hashes in Script Properties) -----
+function hash_(salt, v) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + '|' + String(v));
+  return bytes.map(function (b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
+}
+/** Menu item 6: you type an admin ID and password. Only you will know them. */
+function setAdminLogin() {
+  var ui = SpreadsheetApp.getUi();
+  var a = ui.prompt('Admin ID', 'Type the admin ID you want to use (example: rajinder):', ui.ButtonSet.OK_CANCEL);
+  if (a.getSelectedButton() !== ui.Button.OK || !a.getResponseText().trim()) return;
+  var p = ui.prompt('Admin password', 'Type a strong password (8+ characters). Do not share it with callers:', ui.ButtonSet.OK_CANCEL);
+  if (p.getSelectedButton() !== ui.Button.OK || p.getResponseText().length < 8) { ui.alert('Password must be 8 or more characters. Nothing saved.'); return; }
+  var props = PropertiesService.getScriptProperties();
+  var salt = Utilities.getUuid();
+  props.setProperties({ SALT: salt, ADMIN_ID_HASH: hash_(salt, a.getResponseText().trim().toLowerCase()),
+    ADMIN_PASS_HASH: hash_(salt, p.getResponseText()), FAILS: '0', LOCK_UNTIL: '0' });
+  ui.alert('Admin login saved. Use this ID and password inside the app on each phone, once.');
+}
+function adminAction_(action, body) {
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('ADMIN_PASS_HASH')) return json_({ ok: false, error: 'not_set', msg: 'Admin login is not set yet. In the Sheet click Call Tracker > 6. Set admin login.' });
+  if (Date.now() < Number(props.getProperty('LOCK_UNTIL') || 0)) return json_({ ok: false, error: 'locked', msg: 'Too many wrong attempts. Try again after 15 minutes.' });
+  var salt = props.getProperty('SALT');
+  var ok = hash_(salt, String(body.adminId || '').trim().toLowerCase()) === props.getProperty('ADMIN_ID_HASH') &&
+           hash_(salt, body.adminPass || '') === props.getProperty('ADMIN_PASS_HASH');
+  if (!ok) {
+    var f = Number(props.getProperty('FAILS') || 0) + 1;
+    if (f >= 5) { props.setProperties({ FAILS: '0', LOCK_UNTIL: String(Date.now() + 15 * 60000) }); }
+    else props.setProperty('FAILS', String(f));
+    return json_({ ok: false, error: 'wrong', msg: 'Wrong admin ID or password.' });
+  }
+  props.setProperty('FAILS', '0');
+  var cv = ss_().getSheetByName('Callers').getDataRange().getValues().slice(1)
+    .filter(function (r) { return String(r[0]).trim() && String(r[3]).trim(); });
+  if (action === 'login') return json_({ ok: true, callers: cv.map(function (r) { return String(r[0]).trim(); }) });
+  for (var i = 0; i < cv.length; i++) if (String(cv[i][0]).trim() === String(body.caller || '').trim()) return json_({ ok: true, token: String(cv[i][3]).trim() });
+  return json_({ ok: false, error: 'no_caller', msg: 'Caller not found in the Callers tab.' });
+}
+
+/** Writes CONNECTED / NOT CONNECTED into the Callers tab (App status + Last seen). */
+function refreshConnection_() {
+  var c = ss_().getSheetByName('Callers'); if (!c || c.getLastRow() < 2) return;
+  var n = c.getLastRow() - 1, v = c.getRange(2, 1, n, 15).getValues(), now = Date.now(), out = [];
+  v.forEach(function (r) {
+    if (!String(r[0]).trim()) { out.push(['', '']); return; }
+    var last = Number(r[12]) || 0;
+    if (!last) { out.push(['NOT CONNECTED (app never connected)', '-']); return; }
+    var seen = dayKey(last) + ' ' + fmtTimeS(last);
+    var recent = now - last <= CFG.CONNECT_MIN * 60000;
+    var st = !recent ? 'NOT CONNECTED (app deleted, phone off or no internet)'
+      : (String(r[13]) === 'OFF' ? 'PERMISSION OFF (call log not allowed)' : 'CONNECTED');
+    out.push([st, seen]);
+  });
+  var kr = c.getRange(2, 11, n, 2);
+  kr.setNumberFormat('@'); kr.setValues(out);
+  var col = c.getRange(2, 11, n, 1);
+  c.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('NOT CONNECTED').setBackground('#f4cccc').setFontColor('#990000').setRanges([col]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('PERMISSION').setBackground('#fce5cd').setFontColor('#b45f06').setRanges([col]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('CONNECTED').setBackground('#d9ead3').setFontColor('#274e13').setRanges([col]).build()
+  ]);
 }
 function doGet() { return json_({ ok: true, msg: 'Call tracker is running' }); }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 
 /** Rebuilds Daily Summary (newest day first, callers A-Z). Also tidies Date/Time in Call Log to dd-Mon-yyyy and hh:mm:ss. */
 function rebuildSummary() {
+  refreshConnection_();
   var log = sheet_('Call Log', HEAD_LOG), sum = sheet_('Daily Summary', HEAD_SUM);
   var v = log.getLastRow() > 1 ? log.getRange(2, 1, log.getLastRow() - 1, 8).getValues() : [];
 
@@ -368,5 +452,6 @@ function onOpen() {
     .addItem('3. Rebuild summary now', 'rebuildSummary')
     .addItem('4. Auto-refresh every 10 min', 'installTrigger')
     .addItem('5. Update Callers tab (shift & breaks)', 'updateCallersTab')
+    .addItem('6. Set admin login (ID + password)', 'setAdminLogin')
     .addToUi();
 }

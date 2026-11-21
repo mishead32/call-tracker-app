@@ -2,6 +2,7 @@ package com.gcs.calltracker
 
 import android.Manifest
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.provider.CallLog
 import org.json.JSONArray
@@ -12,73 +13,86 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Reads the phone's call log (time, number, direction, duration only) and sends it to the Google Sheet. */
+/**
+ * Reads the phone's call log (time, number, direction, duration only) and sends it to the company Sheet.
+ * Every run also sends a "heartbeat" so the Sheet knows the app is still installed and working.
+ */
 object Syncer {
 
     private const val HOUR = 3600_000L
+    const val VERSION = "1.1"
 
     fun run(ctx: Context): String {
         val p = ctx.getSharedPreferences("ct", Context.MODE_PRIVATE)
         val url = p.getString("url", "")?.trim().orEmpty()
         val token = p.getString("token", "")?.trim().orEmpty()
-        if (url.isEmpty() || token.isEmpty()) return finish(p, "Not set up: enter URL and token, then press Save.")
-        if (ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
-            return finish(p, "Call log permission is not allowed yet.")
-        }
+        if (url.isEmpty() || token.isEmpty()) return finish(p, "Not connected. Ask your manager to set up this phone.")
 
-        // First run: start from yesterday midnight-ish (last 36 hours). Later runs: since last sent call (minus 1 hour overlap).
+        val perm = ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
+
+        // First run: last 36 hours. Later runs: since last sent call (minus 1 hour overlap; the Sheet removes duplicates).
         val since = p.getLong("last", System.currentTimeMillis() - 36 * HOUR) - HOUR
 
         val calls = JSONArray()
         var newest = p.getLong("last", 0L)
-        try {
-            ctx.contentResolver.query(
-                CallLog.Calls.CONTENT_URI,
-                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
-                "${CallLog.Calls.DATE} > ?",
-                arrayOf(since.toString()),
-                "${CallLog.Calls.DATE} ASC"
-            )?.use { c ->
-                while (c.moveToNext()) {
-                    val number = c.getString(0)?.takeIf { it.isNotBlank() } ?: "unknown"
-                    val type = when (c.getInt(1)) {
-                        CallLog.Calls.OUTGOING_TYPE -> "OUTGOING"
-                        CallLog.Calls.INCOMING_TYPE -> "INCOMING"
-                        CallLog.Calls.MISSED_TYPE -> "MISSED"
-                        CallLog.Calls.REJECTED_TYPE -> "REJECTED"
-                        else -> "OTHER"
+        if (perm) {
+            try {
+                ctx.contentResolver.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
+                    "${CallLog.Calls.DATE} > ?",
+                    arrayOf(since.toString()),
+                    "${CallLog.Calls.DATE} ASC"
+                )?.use { c ->
+                    while (c.moveToNext()) {
+                        val number = c.getString(0)?.takeIf { it.isNotBlank() } ?: "unknown"
+                        val type = when (c.getInt(1)) {
+                            CallLog.Calls.OUTGOING_TYPE -> "OUTGOING"
+                            CallLog.Calls.INCOMING_TYPE -> "INCOMING"
+                            CallLog.Calls.MISSED_TYPE -> "MISSED"
+                            CallLog.Calls.REJECTED_TYPE -> "REJECTED"
+                            else -> "OTHER"
+                        }
+                        val date = c.getLong(2)
+                        val dur = c.getLong(3)
+                        calls.put(JSONObject().put("time", date).put("number", number).put("type", type).put("duration", dur))
+                        if (date > newest) newest = date
                     }
-                    val date = c.getLong(2)
-                    val dur = c.getLong(3)
-                    calls.put(JSONObject().put("time", date).put("number", number).put("type", type).put("duration", dur))
-                    if (date > newest) newest = date
                 }
+            } catch (e: Exception) {
+                return finish(p, "Could not read call log: ${e.message}")
             }
-        } catch (e: Exception) {
-            return finish(p, "Could not read call log: ${e.message}")
         }
 
-        if (calls.length() == 0) return finish(p, "No new calls to send.")
-
-        var sent = 0
+        val total = calls.length()
         var added = 0
         var i = 0
-        while (i < calls.length()) {
+        do {
+            val end = minOf(i + 200, total)
             val chunk = JSONArray()
-            val end = minOf(i + 200, calls.length())
             for (j in i until end) chunk.put(calls.get(j))
-            val body = JSONObject().put("token", token).put("calls", chunk).toString()
-            val reply = post(url, body) ?: return finish(p, "Could not reach the Sheet. Check internet and URL. Will retry.")
+            val body = JSONObject()
+                .put("action", "sync").put("token", token).put("calls", chunk)
+                .put("perm", perm).put("ver", VERSION).toString()
+            val reply = post(url, body) ?: return finish(p, "Could not reach the Sheet. Check internet. Will retry.")
             if (!reply.contains("\"ok\":true")) return finish(p, "Sheet said: ${reply.take(120)}")
             added += Regex("\"added\":(\\d+)").find(reply)?.groupValues?.get(1)?.toInt() ?: 0
-            sent += end - i
             i = end
-        }
-        p.edit().putLong("last", newest).apply()
-        return finish(p, "Sent $sent calls ($added new).")
+        } while (i < total)
+
+        if (perm && newest > 0) p.edit().putLong("last", newest).apply()
+        return finish(
+            p,
+            when {
+                !perm -> "Call log permission is OFF. Please allow it."
+                total == 0 -> "Connected. No new calls."
+                else -> "Sent $total calls ($added new)."
+            }
+        )
     }
 
-    private fun post(url: String, body: String): String? {
+    /** Sends JSON text to the web app; returns the reply text, or null if the network failed. */
+    fun post(url: String, body: String): String? {
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
@@ -97,7 +111,7 @@ object Syncer {
         }
     }
 
-    private fun finish(p: android.content.SharedPreferences, msg: String): String {
+    private fun finish(p: SharedPreferences, msg: String): String {
         val stamp = SimpleDateFormat("dd MMM, HH:mm", Locale.US).format(Date())
         val full = "$stamp - $msg"
         p.edit().putString("status", full).apply()
