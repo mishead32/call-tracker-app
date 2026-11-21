@@ -11,10 +11,7 @@
 var CFG = {
   SHIFT_START: '09:00',
   SHIFT_END: '18:00',
-  LUNCH_START: '13:10',
-  LUNCH_END: '13:50',
-  TEA_START: '16:00',     // 20-minute tea break (change here or per caller)
-  TEA_END: '16:20',
+  BREAK_MIN: 60,          // total break per day (lunch + tea together), no fixed times
   IDLE_MIN: 10,           // gap with no call that counts as idle
   PROD_GOOD: 0.40,        // productivity at or above this = green
   PROD_LOW: 0.20,         // productivity below this = red
@@ -45,11 +42,10 @@ function fmtHMS(ms) {                // duration -> HH:MM:SS (hours can pass 24)
   var t = Math.round(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
   return pad(h) + ':' + pad(m) + ':' + pad(s);
 }
-/** "9:00", "09:00", "9:00 AM", "6:00 PM", "18:00:00" -> "HH:MM". Blank -> fallback. "-"/"none" -> null (no such break). */
+/** "9:00", "09:00", "9:00 AM", "6:00 PM", "18:00:00" -> "HH:MM". Blank/invalid -> fallback. */
 function parseHM(v, fb) {
   var s = String(v == null ? '' : v).trim().toUpperCase();
   if (!s) return fb;
-  if (s === '-' || s === 'NONE' || s === 'NO') return null;
   var m = s.match(/^(\d{1,2})[:.](\d{2})(?::\d{2})?\s*(AM|PM)?$/);
   if (!m) return fb;
   var h = +m[1], mi = +m[2];
@@ -58,73 +54,74 @@ function parseHM(v, fb) {
   if (h > 23 || mi > 59) return fb;
   return pad(h) + ':' + pad(mi);
 }
-/** Callers-tab row (as displayed text) -> shift object. Columns E..J = start, end, lunch from/to, tea from/to. */
+/** Total break as typed in the Callers tab: "01:00" = 1 hour, "00:45" = 45 min, "60" = 60 min, "-" = none.
+ *  Returns minutes, or null if blank/invalid (or more than 4 hours). */
+function parseBreakMin(v) {
+  var s = String(v == null ? '' : v).trim().toLowerCase();
+  if (!s) return null;
+  if (s === '-' || s === 'none' || s === 'no' || s === '0') return 0;
+  var m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/), min;
+  if (m) { if (+m[2] > 59) return null; min = +m[1] * 60 + +m[2]; }
+  else if (/^\d{1,3}$/.test(s)) min = +s;
+  else return null;
+  return min > 240 ? null : min;
+}
+/** Callers-tab row (as displayed text) -> shift. Columns: E = shift start, F = shift end, G = total break. */
 function shiftFromRow(r) {
-  var breaks = [];
-  var ls = parseHM(r[6], CFG.LUNCH_START), le = parseHM(r[7], CFG.LUNCH_END);
-  var ts = parseHM(r[8], CFG.TEA_START), te = parseHM(r[9], CFG.TEA_END);
-  if (ls && le) breaks.push([ls, le]);
-  if (ts && te) breaks.push([ts, te]);
+  var b = parseBreakMin(r[6]);
   return {
-    start: parseHM(r[4], CFG.SHIFT_START) || CFG.SHIFT_START,
-    end: parseHM(r[5], CFG.SHIFT_END) || CFG.SHIFT_END,
-    breaks: breaks
+    start: parseHM(r[4], CFG.SHIFT_START),
+    end: parseHM(r[5], CFG.SHIFT_END),
+    breakMin: b === null ? CFG.BREAK_MIN : b
   };
 }
-function defaultShift() {
-  return { start: CFG.SHIFT_START, end: CFG.SHIFT_END, breaks: [[CFG.LUNCH_START, CFG.LUNCH_END], [CFG.TEA_START, CFG.TEA_END]] };
-}
-/** Working segments of a day: shift window minus breaks. */
-function buildSegments(key, shift) {
-  var base = dayStartMs(key);
-  var s = base + hmMs(shift.start), e = base + hmMs(shift.end);
-  var cuts = (shift.breaks || []).map(function (b) { return [base + hmMs(b[0]), base + hmMs(b[1])]; })
-    .filter(function (b) { return b[1] > b[0]; }).sort(function (a, b) { return a[0] - b[0]; });
-  var segs = [], cur = s;
-  cuts.forEach(function (b) {
-    var bs = Math.max(b[0], s), be = Math.min(b[1], e);
-    if (be <= bs) return;
-    if (bs > cur) segs.push([cur, bs]);
-    cur = Math.max(cur, be);
-  });
-  if (e > cur) segs.push([cur, e]);
-  return segs;
-}
+function defaultShift() { return { start: CFG.SHIFT_START, end: CFG.SHIFT_END, breakMin: CFG.BREAK_MIN }; }
 
-/** calls: [{start(ms), dur(sec), type}] for ONE caller on ONE day. nowMs cuts off today's working time. */
+/**
+ * calls: [{start(ms), dur(sec), type}] for ONE caller on ONE day. nowMs cuts off today's working time.
+ * Working time = shift so far minus the break allowance (full allowance once the shift is over; part of it
+ * while the shift is still running). The break is assumed to be taken inside the longest no-call gaps, so
+ * those minutes are NOT counted as idle.
+ */
 function computeDay(calls, key, nowMs, shift) {
   shift = shift || defaultShift();
-  var fullSegs = buildSegments(key, shift);
+  var base = dayStartMs(key);
+  var s = base + hmMs(shift.start), e = base + hmMs(shift.end);
+  var upto = Math.min(e, nowMs), elapsed = Math.max(0, upto - s), full = Math.max(1, e - s);
+  var breakMs = Math.min(elapsed, shift.breakMin * 60000 * (elapsed / full));
+  var workMs = Math.max(0, elapsed - breakMs);
+
   var busy = calls.filter(function (c) { return c.dur > 0; })
     .map(function (c) { return [c.start, c.start + c.dur * 1000]; })
     .sort(function (a, b) { return a[0] - b[0]; });
 
-  var idleMs = 0, gaps = 0, longest = 0, workMs = 0, talkMs = 0, thr = CFG.IDLE_MIN * 60000;
-  function gap(len) {
-    if (len >= thr) { idleMs += len; gaps++; if (len > longest) longest = len; }
-  }
-  fullSegs.forEach(function (seg) {
-    var s = seg[0], e = Math.min(seg[1], nowMs);
-    if (e <= s) return;
-    workMs += e - s;
-    var cur = s;
+  var talkMs = 0, gaps = [], thr = CFG.IDLE_MIN * 60000, cur = s;
+  if (elapsed > 0) {
     busy.forEach(function (b) {
-      var bs = Math.max(b[0], s), be = Math.min(b[1], e);
+      var bs = Math.max(b[0], s), be = Math.min(b[1], upto);
       if (be <= bs) return;
       talkMs += be - bs;
-      if (bs > cur) gap(bs - cur);
+      if (bs > cur && bs - cur >= thr) gaps.push(bs - cur);
       cur = Math.max(cur, be);
     });
-    if (e > cur) gap(e - cur);
+    if (upto > cur && upto - cur >= thr) gaps.push(upto - cur);
+  }
+  // the break allowance is taken out of the longest gaps first
+  gaps.sort(function (a, b) { return b - a; });
+  var left = breakMs, kept = [];
+  gaps.forEach(function (g) {
+    var use = Math.min(g, left); left -= use; g -= use;
+    if (g >= thr) kept.push(g);
   });
+  var idleMs = 0, longest = 0;
+  kept.forEach(function (g) { idleMs += g; if (g > longest) longest = g; });
 
   var out = 0, inc = 0, missed = 0, outside = 0, first = null, last = null;
   calls.forEach(function (c) {
     if (c.type === 'OUTGOING') out++;
     else if (c.type === 'INCOMING') inc++;
     else missed++;                                  // MISSED / REJECTED
-    var inside = fullSegs.some(function (g) { return c.start >= g[0] && c.start < g[1]; });
-    if (!inside) outside++;
+    if (c.start < s || c.start >= e) outside++;
     if (first === null || c.start < first) first = c.start;
     var end = c.start + c.dur * 1000;
     if (last === null || end > last) last = end;
@@ -132,7 +129,7 @@ function computeDay(calls, key, nowMs, shift) {
   return {
     total: calls.length, out: out, inc: inc, missed: missed, outside: outside,
     first: first, last: last,
-    workMs: workMs, talkMs: talkMs, idleMs: idleMs, gaps: gaps, longestMs: longest
+    workMs: workMs, breakMs: breakMs, talkMs: talkMs, idleMs: idleMs, gaps: kept.length, longestMs: longest
   };
 }
 
@@ -141,7 +138,7 @@ function genTestCalls(key) {
   var base = dayStartMs(key);
   function t(hhmm) { return base + hmMs(hhmm); }
   var A = [], S = [];
-  var tm = t('09:05'), i = 0, lunchS = t(CFG.LUNCH_START), lunchE = t(CFG.LUNCH_END), end = t('17:55');
+  var tm = t('09:05'), i = 0, lunchS = t('13:10'), lunchE = t('13:50'), end = t('17:55');
   while (tm < end) {
     if (tm >= lunchS && tm < lunchE) { tm = lunchE + 120000; continue; }
     A.push({ start: tm, dur: 120 + (i * 37) % 120, type: i % 5 === 4 ? 'INCOMING' : 'OUTGOING' });
@@ -158,10 +155,10 @@ function genTestCalls(key) {
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
 var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secret)',
-  'Shift start', 'Shift end', 'Lunch from', 'Lunch to', 'Tea from', 'Tea to',
+  'Shift start', 'Shift end', 'Total break (hh:mm)', '(not used)', '(not used)', '(not used)',
   'App status', 'Last seen', 'LastSeenMs (auto)', 'Call log permission (auto)', 'App version (auto)'];
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
-  'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside working hours',
+  'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
   'Calls per working hour', 'Working time (excl. breaks)', 'Time on calls', 'Productivity %',
   'Idle time (no call for 10+ min)', 'No. of idle stretches', 'Longest idle stretch',
   'First call', 'Last call ended'];
@@ -170,12 +167,12 @@ var NOTES_SUM = [
   'Shift start to shift end for this caller (set in the Callers tab).',
   'All calls in the phone call log that day.', 'Calls the caller dialled.', 'Calls the caller received and answered.',
   'Calls that rang but were not answered, or were declined.',
-  'Calls that started before shift start, after shift end, or during lunch/tea break.',
+  'Calls that started before the shift start or after the shift end.',
   'Calls made inside working time divided by working hours.',
-  'Shift length minus lunch and tea breaks. Today: only up to the current time.',
+  'Shift length minus the total break time (lunch + tea). Today: only up to the current time, with the break counted in proportion.',
   'Time actually spent talking on calls, inside working time (hh:mm:ss).',
   'Time on calls divided by working time. Green = good, red = low.',
-  'Total time inside working hours with no call for 10 minutes or more.',
+  'Time with no call for 10 minutes or more. The break time is taken out of the longest gaps first, so it is not counted as idle.',
   'How many separate times the caller was idle (no call for 10+ minutes).',
   'The single longest period with no call.',
   'Start time of the first call of the day.', 'Time the last call of the day ended.'];
@@ -212,7 +209,7 @@ function setup() {
   SpreadsheetApp.getUi().alert('Setup done. Tabs: Callers, Call Log, Daily Summary.');
 }
 
-/** Adds the shift / break columns to the Callers tab and fills blanks with the default times. Safe to run again. */
+/** Adds the shift / break columns to the Callers tab and fills blanks with defaults. Safe to run again. */
 function updateCallersTab() {
   var c = ss_().getSheetByName('Callers');
   var n = HEAD_CALLERS.length;
@@ -220,18 +217,19 @@ function updateCallersTab() {
     .setWrap(true).setHorizontalAlignment('center');
   c.setFrozenRows(1);
   var last = Math.max(c.getLastRow(), 2);
-  c.getRange(2, 5, 200, 6).setNumberFormat('@');                       // keep times as plain text like 09:00
+  c.getRange(2, 5, 200, 3).setNumberFormat('@');                       // keep times as plain text like 09:00
   var vals = c.getRange(2, 1, last - 1, n).getDisplayValues();
-  var def = [CFG.SHIFT_START, CFG.SHIFT_END, CFG.LUNCH_START, CFG.LUNCH_END, CFG.TEA_START, CFG.TEA_END];
   var fill = vals.map(function (r) {
-    return def.map(function (d, i) { return r[0] && !String(r[4 + i]).trim() ? d : r[4 + i]; });
+    if (!r[0]) return [r[4], r[5], r[6], '', '', ''];
+    return [parseHM(r[4], '') || CFG.SHIFT_START, parseHM(r[5], '') || CFG.SHIFT_END,
+      parseBreakMin(r[6]) === null ? '01:00' : r[6], '', '', ''];       // old lunch/tea cells are cleared
   });
   c.getRange(2, 5, fill.length, 6).setValues(fill);
-  c.getRange(1, 5, 1, 6).setNotes([['Shift start time, e.g. 09:00', 'Shift end time, e.g. 18:00',
-    'Lunch break start, e.g. 13:10', 'Lunch break end, e.g. 14:10',
-    'Tea break start, e.g. 16:00. Type - if none', 'Tea break end, e.g. 16:20']]);
-  c.setColumnWidths(5, 6, 80);
-  c.getRange(2, 5, 200, 6).setHorizontalAlignment('center');
+  c.getRange(1, 5, 1, 3).setNotes([['Shift start, e.g. 09:00', 'Shift end, e.g. 18:00',
+    'Total break per day (lunch + tea together), e.g. 01:00 = 1 hour, 00:45 = 45 minutes. Type - if none.']]);
+  c.setColumnWidths(5, 3, 85);
+  c.getRange(2, 5, 200, 3).setHorizontalAlignment('center');
+  c.hideColumns(8, 3);
   c.setColumnWidths(11, 1, 230); c.setColumnWidths(12, 1, 140);
   c.hideColumns(13);
   c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = app deleted, phone off, or no internet.',
@@ -381,7 +379,7 @@ function rebuildSummary() {
       var name = String(cr[0]).trim(), shift = shiftFromRow(cr);
       var x = computeDay(groups[d + '|' + name] || [], d, now, shift);
       var hrs = x.workMs / 3600000;
-      out.push([prettyDay(d), name, cr[2], shift.start + ' to ' + shift.end,
+      out.push([prettyDay(d), name, cr[2], shift.start + ' to ' + shift.end + ' (break ' + fmtHMS(shift.breakMin * 60000).slice(0, 5) + ')',
         x.total, x.out, x.inc, x.missed, x.outside,
         hrs ? Math.round(10 * (x.total - x.outside) / hrs) / 10 : 0,
         fmtHMS(x.workMs), fmtHMS(x.talkMs), x.workMs ? x.talkMs / x.workMs : '',
