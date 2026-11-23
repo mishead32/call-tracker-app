@@ -434,7 +434,7 @@ function rebuildSummary() {
 
 
 // ---------- DASHBOARD TAB (pick dates in A1 and B1) ----------
-var DASH_CHARTS = 6;
+var DASH_CHARTS = 0;   // no charts: summary tables only
 var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (made + received)', 'Outgoing calls',
   'Incoming calls', 'Missed / Rejected calls', 'Total talk time on calls', 'Total idle time (10+ min gaps with no call)',
   'No. of times idle (10+ min gap)', 'Longest single idle gap', 'First call', 'Last call ended'];
@@ -455,7 +455,7 @@ function ensureDashboard_(force) {
     .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
   var props = PropertiesService.getScriptProperties();
   var sh = ss_().getSheetByName('Dashboard');
-  var key = 'v2|' + callers.join('|');
+  var key = 'v3|' + callers.join('|');
   if (sh && !force && props.getProperty('DASH_KEY') === key && sh.getCharts().length === DASH_CHARTS) return;
   buildDashboard_(callers);
   props.setProperty('DASH_KEY', key);
@@ -522,43 +522,9 @@ function buildDashboard_(callers) {
   sh.getRange('A4').setNumberFormat('0'); sh.getRange('D4').setNumberFormat('0%'); sh.getRange('E4').setNumberFormat('0');
   sh.setRowHeight(3, 40); sh.setRowHeight(4, 40);
 
-  // ===== chart data block (P:AA), one row per caller =====
-  sh.getRange('P3').setValue('Chart data (automatic - do not edit)').setFontColor('#999999').setFontStyle('italic');
-  var CH = ['Caller', 'Total calls', 'Outgoing', 'Incoming', 'Missed / Rejected', 'Talk time (hours)', 'Idle time (hours)',
-    'Productivity %', 'Good target', 'Low limit', 'Idle stretches', 'Longest idle gap (min)'];
-  sh.getRange(4, 16, 1, CH.length).setValues([CH]).setFontWeight('bold').setBackground('#eeeeee').setFontColor('#666666').setWrap(true);
-  if (n) {
-    sh.getRange(5, 16, n, 1).setValues(callers.map(function (c) { return [c]; }));
-    var f = [];
-    for (var i = 0; i < n; i++) {
-      var r = 5 + i, who = rng('B') + ',$P' + r + ',' + between;
-      f.push([
-        '=SUMIFS(' + rng('E') + ',' + who + ')', '=SUMIFS(' + rng('F') + ',' + who + ')',
-        '=SUMIFS(' + rng('G') + ',' + who + ')', '=SUMIFS(' + rng('H') + ',' + who + ')',
-        '=ROUND(SUMIFS(' + rng('T') + ',' + who + ')/3600,2)', '=ROUND(SUMIFS(' + rng('U') + ',' + who + ')/3600,2)',
-        '=IFERROR(SUMIFS(' + rng('T') + ',' + who + ')/SUMIFS(' + rng('V') + ',' + who + '),0)',
-        CFG.PROD_GOOD, CFG.PROD_LOW,
-        '=SUMIFS(' + rng('O') + ',' + who + ')',
-        '=IFERROR(ROUND(MAXIFS(' + rng('W') + ',' + who + ')/60,1),0)']);
-    }
-    sh.getRange(5, 17, n, 11).setFormulas(f);
-    sh.getRange(5, 23, n, 3).setNumberFormat('0%');
-    sh.getRange(5, 16, n, 12).setFontColor('#666666');
-  }
-  // trend block (AC:AF): the 14 days ending on the "to" date
-  sh.getRange(4, 29, 1, 4).setValues([['Day', 'Total calls', 'Productivity %', '(date)']]).setFontWeight('bold').setBackground('#eeeeee').setFontColor('#666666');
-  for (var d = 5; d <= 18; d++) {
-    sh.getRange(d, 32).setFormula('=$Q$2-' + (18 - d));
-    sh.getRange(d, 29).setFormula('=TEXT($AF' + d + ',"dd mmm")');
-    sh.getRange(d, 30).setFormula('=SUMIFS(' + rng('E') + ',' + rng('S') + ',$AF' + d + ')');
-    sh.getRange(d, 31).setFormula('=IFERROR(SUMIFS(' + rng('T') + ',' + rng('S') + ',$AF' + d + ')/SUMIFS(' + rng('V') + ',' + rng('S') + ',$AF' + d + '),0)');
-  }
-  sh.getRange('AF5:AF18').setNumberFormat('dd/mm/yyyy'); sh.getRange('AE5:AE18').setNumberFormat('0%');
-  sh.getRange('AC5:AF18').setFontColor('#666666');
-
   // ===== heatmap: calls by hour of day (rows 39+) =====
-  var H0 = 39;
-  sh.getRange(H0, 1).setValue('CALLS BY HOUR OF THE DAY  (darker green = more calls, white = no calls in that hour)')
+  var H0 = 7;
+  sh.getRange(H0, 1).setValue('WHEN DID CALLS HAPPEN?  Calls per hour of the day (darker green = more calls, white = none)')
     .setFontWeight('bold').setFontSize(12).setFontColor('#174ea6');
   var hh = ['Caller']; for (var h = 0; h < HEAT_HOURS; h++) hh.push(hourLabel_(HEAT_FIRST_HOUR + h)); hh.push('Total');
   sh.getRange(H0 + 1, 1, 1, hh.length).setValues([hh]).setFontWeight('bold').setFontColor('#ffffff').setBackground('#1a73e8')
@@ -595,7 +561,7 @@ function buildDashboard_(callers) {
   var widths = [130, 100, 100, 150, 100, 90, 90, 100, 110, 130, 150, 110, 95, 110];
   widths.forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
   sh.setColumnWidth(15, 30);
-  sh.setColumnWidths(16, 17, 95);
+  sh.hideColumns(16, 4);
 
   var rules = [
     SpreadsheetApp.newConditionalFormatRule()
@@ -608,7 +574,6 @@ function buildDashboard_(callers) {
   }
   sh.setConditionalFormatRules(rules);
 
-  if (n) buildDashCharts_(sh, n);
   if (isNew) ss_().setActiveSheet(sh);
 }
 
