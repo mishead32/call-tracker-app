@@ -566,7 +566,10 @@ function buildDashCharts_(sh, n) {
       .setOption('title', title).setOption('width', 480).setOption('height', 330)
       .setOption('legend', { position: 'bottom' }).setOption('colors', colors)
       .setOption('hAxis', { title: 'Caller' });
-    if (stacked) b.setStacked();
+    if (stacked) {
+      try { b = b.asColumnChart(); b.setStacked(); }       // stacked bars need the column-chart builder
+      catch (e) { b.setOption('isStacked', true); }
+    }
     if (labels) {
       var ser = {}; ranges.slice(1).forEach(function (_, i) { ser[i] = { dataLabel: 'value' }; });
       b.setOption('series', ser);
