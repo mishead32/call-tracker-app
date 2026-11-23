@@ -455,7 +455,7 @@ function ensureDashboard_(force) {
     .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
   var props = PropertiesService.getScriptProperties();
   var sh = ss_().getSheetByName('Dashboard');
-  var key = 'v5|' + callers.join('|');
+  var key = 'v6|' + callers.join('|');
   if (sh && !force && props.getProperty('DASH_KEY') === key && sh.getCharts().length === (callers.length ? DASH_CHARTS : 0)) return;
   buildDashboard_(callers);
   props.setProperty('DASH_KEY', key);
@@ -545,6 +545,13 @@ function buildDashboard_(callers) {
     sh.getRange(H0 + 2, 2, n, HEAT_HOURS + 1).setFormulas(hf).setHorizontalAlignment('center');
     sh.getRange(H0 + 2, 1, n, HEAT_HOURS + 2).setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
     sh.getRange(H0 + 2, HEAT_HOURS + 2, n, 1).setFontWeight('bold').setBackground('#e8f0fe');
+    // last row: total of all callers
+    var tr = H0 + 2 + n, tf = [];
+    for (var c4 = 0; c4 <= HEAT_HOURS; c4++) { var L4 = String.fromCharCode(66 + c4); tf.push('=SUM(' + L4 + (H0 + 2) + ':' + L4 + (H0 + 1 + n) + ')'); }
+    sh.getRange(tr, 1).setValue('TOTAL (all callers)');
+    sh.getRange(tr, 2, 1, HEAT_HOURS + 1).setFormulas([tf]);
+    sh.getRange(tr, 1, 1, HEAT_HOURS + 2).setFontWeight('bold').setBackground('#d2e3fc').setHorizontalAlignment('center')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
   }
 
   // ===== time-wise chart data (visible grey helper from column U): hours down, one column per caller =====
@@ -592,7 +599,7 @@ function buildDashboard_(callers) {
     var ser = {}; for (var k2 = 0; k2 < n; k2++) ser[k2] = {};
     addChartSafe_(sh, { type: Charts.ChartType.COLUMN, title: 'Time-wise calls by caller',
       ranges: [sh.getRange(H0 + 1, 21, HEAT_HOURS + 1, n + 1)],
-      colors: cols, series: ser, hTitle: 'Hour of the day', row: H0 + 2 + n + 1, col: 1 });
+      colors: cols, series: ser, hTitle: 'Hour of the day', row: H0 + 2 + n + 2, col: 1 });
   }
   if (isNew) ss_().setActiveSheet(sh);
 }
