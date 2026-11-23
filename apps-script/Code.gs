@@ -188,6 +188,10 @@ function sheet_(name, header) {
 }
 var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var WDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function serialDate(key) {            // Google Sheets date number for a yyyy-mm-dd key
+  var p = key.split('-');
+  return Math.round((Date.UTC(+p[0], +p[1] - 1, +p[2]) - Date.UTC(1899, 11, 30)) / 86400000);
+}
 function prettyDay(key) {
   var d = new Date(dayStartMs(key) + IST);
   return WDAYS[d.getUTCDay()] + ' ' + pad(d.getUTCDate()) + '-' + MONTHS[d.getUTCMonth()] + '-' + d.getUTCFullYear();
@@ -373,7 +377,7 @@ function rebuildSummary() {
     .filter(function (r) { return String(r[0]).trim(); })
     .sort(function (a, b) { return String(a[0]).trim() < String(b[0]).trim() ? -1 : 1; });
 
-  var out = [], bg = [], band = 0;
+  var out = [], bg = [], helper = [], band = 0;
   Object.keys(days).sort().reverse().forEach(function (d) {
     callerRows.forEach(function (cr) {
       var name = String(cr[0]).trim(), shift = shiftFromRow(cr);
@@ -385,6 +389,7 @@ function rebuildSummary() {
         fmtHMS(x.workMs), fmtHMS(x.talkMs), x.workMs ? x.talkMs / x.workMs : '',
         fmtHMS(x.idleMs), x.gaps, fmtHMS(x.longestMs),
         x.first ? fmtTimeS(x.first) : '-', x.last ? fmtTimeS(x.last) : '-']);
+      helper.push([serialDate(d), Math.round(x.talkMs / 1000), Math.round(x.idleMs / 1000)]);
       bg.push(HEAD_SUM.map(function () { return band % 2 ? '#f3f3f3' : '#ffffff'; }));
     });
     band++;
@@ -403,6 +408,10 @@ function rebuildSummary() {
   if (!out.length) return;
 
   var body = sum.getRange(2, 1, out.length, n);
+  sum.getRange(1, 19, 1, 3).setValues([['(helper) date', '(helper) talk sec', '(helper) idle sec']]);
+  sum.getRange(2, 19, out.length, 3).setValues(helper);
+  sum.getRange(2, 19, out.length, 1).setNumberFormat('dd/mm/yyyy');
+  sum.hideColumns(19, 3);
   [1, 2, 3, 4, 11, 12, 14, 16, 17, 18].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); });
   body.setValues(out);
   body.setBackgrounds(bg).setVerticalAlignment('middle');
@@ -420,6 +429,157 @@ function rebuildSummary() {
   sum.setColumnWidths(1, 1, 120); sum.setColumnWidths(2, 1, 100); sum.setColumnWidths(3, 1, 100);
   sum.setColumnWidths(4, 1, 105); sum.setColumnWidths(5, n - 4, 95);
   sum.setRowHeight(1, 60);
+  try { ensureDashboard_(false); } catch (err) { /* dashboard problems must never break the summary */ }
+}
+
+
+// ---------- DASHBOARD TAB (pick dates in A1 and B1) ----------
+var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (made + received)', 'Outgoing calls',
+  'Incoming calls', 'Missed / Rejected calls', 'Total talk time on calls', 'Total idle time (10+ min gaps with no call)',
+  'No. of times idle (10+ min gap)', 'Longest single idle gap', 'First call', 'Last call ended'];
+var DASH_NOTES = ['Day of the calls.', 'Telecaller name.', 'Company / vertical.', 'Shift start to end, and the total break that is deducted.',
+  'Every call on the phone that day: calls the caller made + calls the caller received + missed/rejected calls.',
+  'Calls the caller dialled to customers (includes calls that were not picked up).',
+  'Calls from customers that the caller picked up.',
+  'Missed = a customer called and the caller did not pick up. Rejected = a customer called and the caller cut the call. (A call the caller dialled that nobody answered is counted under Outgoing.)',
+  'Total time spent talking on connected calls (hh:mm:ss).',
+  'Add up every gap of 10+ minutes with no call. Break time is taken out of the longest gaps first.',
+  'How many separate times the caller sat idle for 10+ minutes.',
+  'The biggest single gap with no call that day.', 'Time the first call started.', 'Time the last call ended.'];
+
+function ensureDashboard_(force) {
+  var callers = ss_().getSheetByName('Callers').getDataRange().getDisplayValues().slice(1)
+    .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
+  var props = PropertiesService.getScriptProperties();
+  var sh = ss_().getSheetByName('Dashboard');
+  var key = callers.join('|');
+  if (sh && !force && props.getProperty('DASH_KEY') === key && sh.getCharts().length === 3) return;
+  buildDashboard_(callers);
+  props.setProperty('DASH_KEY', key);
+}
+
+/** Menu item 7: builds (or rebuilds) the Dashboard tab. */
+function buildDashboard() {
+  ensureDashboard_(true);
+  ss_().setActiveSheet(ss_().getSheetByName('Dashboard'));
+}
+
+function buildDashboard_(callers) {
+  var sh = ss_().getSheetByName('Dashboard');
+  var isNew = !sh;
+  if (isNew) { sh = ss_().insertSheet('Dashboard', 0); }
+  var keepFrom = sh.getRange('A1').getValue(), keepTo = sh.getRange('B1').getValue();
+  sh.getCharts().forEach(function (c) { sh.removeChart(c); });
+  sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), Math.max(sh.getMaxColumns(), 22)).clear();
+  sh.clearConditionalFormatRules();
+  sh.setHiddenGridlines(true);
+
+  var DS = "'Daily Summary'!";
+  function rng(col) { return DS + '$' + col + '$2:$' + col + '$1000'; }
+  var between = rng('S') + ',">="&$Q$1,' + rng('S') + ',"<="&$Q$2';
+
+  // --- A1 / B1: the two dates you choose ---
+  var today = serialDate(dayKey(Date.now()));
+  sh.getRange('A1:B1').setNumberFormat('dd/mm/yyyy').setBackground('#fff2cc').setFontWeight('bold')
+    .setHorizontalAlignment('center').setBorder(true, true, true, true, true, true, '#bf9000', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  sh.getRange('A1').setValue(keepFrom || today);
+  sh.getRange('B1').setValue(keepTo || today);
+  var dv = SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false).setHelpText('Type or pick a date, dd/mm/yyyy').build();
+  sh.getRange('A1:B1').setDataValidation(dv);
+  sh.getRange('A1').setNote('FROM date (dd/mm/yyyy). Click the cell and type or pick a date.');
+  sh.getRange('B1').setNote('TO date (dd/mm/yyyy). For a single day, use the same date as A1 (or leave B1 empty).');
+  sh.getRange('C1').setValue('<-- Choose FROM date in A1 and TO date in B1. Everything below updates by itself.')
+    .setFontColor('#7f6000').setFontStyle('italic');
+
+  // helper cells: dates actually used
+  sh.getRange('P1').setValue('From date used'); sh.getRange('Q1').setFormula('=IF($A$1="",TODAY(),$A$1)');
+  sh.getRange('P2').setValue('To date used'); sh.getRange('Q2').setFormula('=IF($B$1="",$Q$1,MAX($B$1,$Q$1))');
+  sh.getRange('Q1:Q2').setNumberFormat('dd/mm/yyyy');
+
+  // --- title + KPI cards ---
+  sh.getRange('A2').setFormula('="TELECALLER REPORT  |  "&TEXT($Q$1,"dd/mm/yyyy")&IF($Q$2<>$Q$1," to "&TEXT($Q$2,"dd/mm/yyyy"),"")')
+    .setFontSize(14).setFontWeight('bold').setFontColor('#274e13');
+  sh.getRange('A3:D3').setValues([['Total calls (made + received)', 'Total talk time', 'Total idle time', 'Days selected']])
+    .setFontWeight('bold').setBackground('#d9ead3').setHorizontalAlignment('center').setWrap(true).setVerticalAlignment('middle');
+  sh.getRange('A4').setFormula('=SUMIFS(' + rng('E') + ',' + between + ')');
+  sh.getRange('B4').setFormula('=TEXT(SUMIFS(' + rng('T') + ',' + between + ')/86400,"[h]:mm:ss")');
+  sh.getRange('C4').setFormula('=TEXT(SUMIFS(' + rng('U') + ',' + between + ')/86400,"[h]:mm:ss")');
+  sh.getRange('D4').setFormula('=$Q$2-$Q$1+1');
+  sh.getRange('A4:D4').setFontSize(16).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#f3f3f3');
+  sh.getRange('A4').setNumberFormat('0'); sh.getRange('D4').setNumberFormat('0');
+  sh.setRowHeight(3, 40); sh.setRowHeight(4, 38);
+
+  // --- chart data block (P:V): one row per caller ---
+  sh.getRange('P3').setValue('Chart data (automatic - do not edit)').setFontColor('#999999').setFontStyle('italic');
+  var CH = ['Caller', 'Total calls', 'Outgoing', 'Incoming', 'Missed / Rejected', 'Talk time (hours)', 'Idle time (hours)'];
+  sh.getRange(4, 16, 1, 7).setValues([CH]).setFontWeight('bold').setBackground('#eeeeee').setFontColor('#666666');
+  var n = callers.length;
+  if (n) {
+    var names = callers.map(function (c) { return [c]; });
+    sh.getRange(5, 16, n, 1).setValues(names);
+    var f = [];
+    for (var i = 0; i < n; i++) {
+      var r = 5 + i, who = rng('B') + ',$P' + r + ',' + between;
+      f.push([
+        '=SUMIFS(' + rng('E') + ',' + who + ')', '=SUMIFS(' + rng('F') + ',' + who + ')',
+        '=SUMIFS(' + rng('G') + ',' + who + ')', '=SUMIFS(' + rng('H') + ',' + who + ')',
+        '=ROUND(SUMIFS(' + rng('T') + ',' + who + ')/3600,2)', '=ROUND(SUMIFS(' + rng('U') + ',' + who + ')/3600,2)']);
+    }
+    sh.getRange(5, 17, n, 6).setFormulas(f);
+    sh.getRange(5, 16, n, 7).setFontColor('#666666');
+  }
+
+  // --- the table ---
+  var T = 23;
+  sh.getRange(T, 1, 1, DASH_HEAD.length).setValues([DASH_HEAD]).setFontWeight('bold').setBackground('#d9ead3')
+    .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sh.getRange(T, 1, 1, DASH_HEAD.length).setNotes([DASH_NOTES]);
+  sh.setRowHeight(T, 62);
+  sh.getRange(T + 1, 1).setFormula('=IFERROR(FILTER({' + DS + 'A2:H1000,' + DS + 'L2:L1000,' + DS + 'N2:R1000},' +
+    '(' + rng('S') + '>=$Q$1)*(' + rng('S') + '<=$Q$2)*(' + rng('S') + '<>"")),"No calls found for these dates")');
+  sh.getRange(T + 1, 1, 400, DASH_HEAD.length).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sh.getRange(T + 1, 1, 400, 2).setFontWeight('bold');
+  var widths = [130, 100, 100, 150, 90, 90, 90, 100, 110, 130, 150, 110, 95, 110];
+  widths.forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
+  sh.setColumnWidth(15, 30);
+  sh.setColumnWidths(16, 7, 95);
+  sh.setFrozenRows(0);
+  sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($A' + (T + 1) + '<>"",ISEVEN(ROW()))').setBackground('#f3f3f3')
+      .setRanges([sh.getRange(T + 1, 1, 400, DASH_HEAD.length)]).build()
+  ]);
+
+  // --- charts (rows 6-21) ---
+  if (n) buildDashCharts_(sh, n);
+  if (isNew) ss_().setActiveSheet(sh);
+}
+
+function buildDashCharts_(sh, n) {
+  var P = sh.getRange(4, 16, n + 1, 1);
+  function col(c) { return sh.getRange(4, c, n + 1, 1); }
+  function make(title, ranges, colors, row, c, stacked, labels) {
+    var b = sh.newChart().setChartType(Charts.ChartType.COLUMN);
+    ranges.forEach(function (r) { b.addRange(r); });
+    b.setNumHeaders(1).setPosition(row, c, 0, 0)
+      .setOption('title', title).setOption('width', 480).setOption('height', 330)
+      .setOption('legend', { position: 'bottom' }).setOption('colors', colors)
+      .setOption('hAxis', { title: 'Caller' });
+    if (stacked) b.setStacked();
+    if (labels) {
+      var ser = {}; ranges.slice(1).forEach(function (_, i) { ser[i] = { dataLabel: 'value' }; });
+      b.setOption('series', ser);
+    }
+    sh.insertChart(b.build());
+  }
+  function both(title, ranges, colors, row, c, stacked) {
+    try { make(title, ranges, colors, row, c, stacked, true); }
+    catch (e) { make(title, ranges, colors, row, c, stacked, false); }
+  }
+  both('Total calls by caller', [P, col(17)], ['#4285f4'], 6, 1, false);
+  both('Outgoing / Incoming / Missed-Rejected', [P, col(18), col(19), col(20)], ['#34a853', '#4285f4', '#ea4335'], 6, 5, true);
+  both('Talk time vs idle time (hours)', [P, col(21), col(22)], ['#34a853', '#ea4335'], 6, 10, false);
 }
 
 /** TEST: fills two sample days for Amanpreet and Ashima, then builds the summary. */
@@ -451,5 +611,6 @@ function onOpen() {
     .addItem('4. Auto-refresh every 10 min', 'installTrigger')
     .addItem('5. Update Callers tab (shift & breaks)', 'updateCallersTab')
     .addItem('6. Set admin login (ID + password)', 'setAdminLogin')
+    .addItem('7. Build / refresh Dashboard tab', 'buildDashboard')
     .addToUi();
 }
