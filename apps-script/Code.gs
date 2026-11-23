@@ -455,8 +455,8 @@ function ensureDashboard_(force) {
     .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
   var props = PropertiesService.getScriptProperties();
   var sh = ss_().getSheetByName('Dashboard');
-  var key = 'v4|' + callers.join('|');
-  if (sh && !force && props.getProperty('DASH_KEY') === key && sh.getCharts().length === DASH_CHARTS) return;
+  var key = 'v5|' + callers.join('|');
+  if (sh && !force && props.getProperty('DASH_KEY') === key && sh.getCharts().length === (callers.length ? DASH_CHARTS : 0)) return;
   buildDashboard_(callers);
   props.setProperty('DASH_KEY', key);
 }
@@ -524,7 +524,7 @@ function buildDashboard_(callers) {
 
   // ===== heatmap: calls by hour of day (rows 39+) =====
   var H0 = 7;
-  sh.getRange(H0, 1).setValue('WHEN DID CALLS HAPPEN?  Calls per hour of the day (darker green = more calls, white = none)')
+  sh.getRange(H0, 1).setValue('TIME-WISE CALLS  (calls per hour of the day for each caller; darker green = more calls, white = none)')
     .setFontWeight('bold').setFontSize(12).setFontColor('#174ea6');
   var hh = ['Caller']; for (var h = 0; h < HEAT_HOURS; h++) hh.push(hourLabel_(HEAT_FIRST_HOUR + h)); hh.push('Total');
   sh.getRange(H0 + 1, 1, 1, hh.length).setValues([hh]).setFontWeight('bold').setFontColor('#ffffff').setBackground('#1a73e8')
@@ -547,15 +547,17 @@ function buildDashboard_(callers) {
     sh.getRange(H0 + 2, HEAT_HOURS + 2, n, 1).setFontWeight('bold').setBackground('#e8f0fe');
   }
 
-  // ===== hourly chart data (visible grey helper in U:V) =====
-  sh.getRange(H0 + 1, 21, 1, 2).setValues([['Hour', 'Calls (all callers)']]).setFontColor('#999999').setFontWeight('bold');
+  // ===== time-wise chart data (visible grey helper from column U): hours down, one column per caller =====
+  sh.getRange(H0 + 1, 21).setValue('Hour').setFontColor('#999999').setFontWeight('bold');
+  if (n) sh.getRange(H0 + 1, 22, 1, n).setValues([callers]).setFontColor('#999999').setFontWeight('bold');
   for (var h3 = 0; h3 < HEAT_HOURS; h3++) {
-    var colL = String.fromCharCode(66 + h3);
+    var colL = String.fromCharCode(66 + h3), fr = [];
     sh.getRange(H0 + 2 + h3, 21).setValue(hourLabel_(HEAT_FIRST_HOUR + h3));
-    sh.getRange(H0 + 2 + h3, 22).setFormula(n ? '=SUM(' + colL + (H0 + 2) + ':' + colL + (H0 + 1 + n) + ')' : '=0');
+    for (var c3 = 0; c3 < n; c3++) fr.push('=' + colL + (H0 + 2 + c3));
+    if (n) sh.getRange(H0 + 2 + h3, 22, 1, n).setFormulas([fr]);
   }
-  sh.getRange(H0 + 2, 21, HEAT_HOURS, 2).setFontColor('#999999');
-  sh.setColumnWidth(21, 70); sh.setColumnWidth(22, 110);
+  sh.getRange(H0 + 2, 21, HEAT_HOURS, n + 1).setFontColor('#999999');
+  sh.setColumnWidth(21, 70);
 
   // ===== detailed table =====
   var T = H0 + 2 + n + 3 + 17;   // 17 rows of room for the hourly chart
@@ -584,9 +586,14 @@ function buildDashboard_(callers) {
   }
   sh.setConditionalFormatRules(rules);
 
-  addChartSafe_(sh, { type: Charts.ChartType.COLUMN, title: 'Calls by hour of the day (all callers)',
-    ranges: [sh.getRange(H0 + 1, 21, HEAT_HOURS + 1, 1), sh.getRange(H0 + 1, 22, HEAT_HOURS + 1, 1)],
-    colors: [PAL.blue], series: { 0: { dataLabel: 'value' } }, hTitle: 'Hour', row: H0 + 2 + n + 1, col: 1 });
+  if (n) {
+    var pal = [PAL.blue, PAL.green, PAL.amber, PAL.red, '#9334e6', '#12b5cb', '#e8710a', '#5f6368'];
+    var cols = []; for (var k = 0; k < n; k++) cols.push(pal[k % pal.length]);
+    var ser = {}; for (var k2 = 0; k2 < n; k2++) ser[k2] = {};
+    addChartSafe_(sh, { type: Charts.ChartType.COLUMN, title: 'Time-wise calls by caller',
+      ranges: [sh.getRange(H0 + 1, 21, HEAT_HOURS + 1, n + 1)],
+      colors: cols, series: ser, hTitle: 'Hour of the day', row: H0 + 2 + n + 1, col: 1 });
+  }
   if (isNew) ss_().setActiveSheet(sh);
 }
 
