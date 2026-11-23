@@ -159,8 +159,8 @@ var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secr
   'App status', 'Last seen', 'LastSeenMs (auto)', 'Call log permission (auto)', 'App version (auto)'];
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
   'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
-  'Calls per working hour', 'Working time (excl. breaks)', 'Time on calls', 'Productivity %',
-  'Idle time (no call for 10+ min)', 'No. of idle stretches', 'Longest idle stretch',
+  'Calls per working hour', 'Working time (excl. breaks)', 'Total talk time on calls', 'Productivity %',
+  'Total idle time (10+ min gaps with no call)', 'No. of times idle (10+ min gap)', 'Longest single idle gap',
   'First call', 'Last call ended'];
 var NOTES_SUM = [
   'Day of the calls.', 'Telecaller name (Callers tab).', 'Company / vertical (Callers tab).',
@@ -172,9 +172,9 @@ var NOTES_SUM = [
   'Shift length minus the total break time (lunch + tea). Today: only up to the current time, with the break counted in proportion.',
   'Time actually spent talking on calls, inside working time (hh:mm:ss).',
   'Time on calls divided by working time. Green = good, red = low.',
-  'Time with no call for 10 minutes or more. The break time is taken out of the longest gaps first, so it is not counted as idle.',
-  'How many separate times the caller was idle (no call for 10+ minutes).',
-  'The single longest period with no call.',
+  'Add up every gap of 10 minutes or more in which the caller made no call. The break time is taken out of the longest gaps first, so lunch and tea are not counted as idle.',
+  'How many separate times the caller sat idle for 10 minutes or more with no call. Example: 5 means five different long gaps.',
+  'The biggest single gap with no call that day. Example: 00:42:42 means the longest time without a call in one go was 42 minutes 42 seconds.',
   'Start time of the first call of the day.', 'Time the last call of the day ended.'];
 
 function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
