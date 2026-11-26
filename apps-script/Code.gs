@@ -155,7 +155,7 @@ function genTestCalls(key) {
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
 var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secret)',
-  'Shift start', 'Shift end', 'Total break (hh:mm)', 'WhatsApp tracking (auto)', '(not used)', '(not used)',
+  'Shift start', 'Shift end', 'Total break (hh:mm)', 'WhatsApp tracking (auto)', 'Status (Active / Inactive)', '(not used)',
   'App status', 'Last seen', 'LastSeenMs (auto)', 'Call log permission (auto)', 'App version (auto)'];
 var HEAD_WA = ['Caller', 'Date', 'Time', 'Type', 'Voice / Video', 'Duration (sec)', 'Count', 'Key', 'StartMs'];
 var HEAD_WA_DAY = ['Date', 'Caller', 'WhatsApp calls made', 'WhatsApp calls received', 'WhatsApp missed calls',
@@ -228,21 +228,41 @@ function updateCallersTab() {
   c.getRange(2, 5, 200, 3).setNumberFormat('@');                       // keep times as plain text like 09:00
   var vals = c.getRange(2, 1, last - 1, n).getDisplayValues();
   var fill = vals.map(function (r) {
-    if (!r[0]) return [r[4], r[5], r[6], '', '', ''];
+    if (!r[0]) return [r[4], r[5], r[6]];
     return [parseHM(r[4], '') || CFG.SHIFT_START, parseHM(r[5], '') || CFG.SHIFT_END,
-      parseBreakMin(r[6]) === null ? '01:00' : r[6], '', '', ''];       // old lunch/tea cells are cleared
+      parseBreakMin(r[6]) === null ? '01:00' : r[6]];
   });
-  c.getRange(2, 5, fill.length, 6).setValues(fill);
+  c.getRange(2, 5, fill.length, 3).setValues(fill);
+  // Status column (I): dropdown Active / Inactive, blank = Active
+  var stat = vals.map(function (r) { return [!r[0] ? '' : (String(r[8]).trim().toLowerCase() === 'inactive' ? 'Inactive' : 'Active')]; });
+  c.getRange(2, 9, stat.length, 1).setValues(stat);
+  c.getRange(2, 9, 200, 1).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['Active', 'Inactive'], true).setAllowInvalid(false).build())
+    .setHorizontalAlignment('center').setFontWeight('bold');
+  c.setColumnWidths(9, 1, 110);
+  c.getRange(1, 9).setNote('Active = counted in reports. Inactive = employee left: hidden from Daily Summary, Dashboard and WhatsApp Daily (old call data stays in Call Log). Change the dropdown any time.');
+  c.setConditionalFormatRules(c.getConditionalFormatRules().filter(function (r) { return r.getRanges().every(function (g) { return g.getColumn() !== 9; }); })
+    .concat([SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Inactive').setBackground('#d9d9d9').setFontColor('#666666').setRanges([c.getRange(2, 9, 200, 1)]).build()]));
   c.getRange(1, 5, 1, 3).setNotes([['Shift start, e.g. 09:00', 'Shift end, e.g. 18:00',
     'Total break per day (lunch + tea together), e.g. 01:00 = 1 hour, 00:45 = 45 minutes. Type - if none.']]);
   c.setColumnWidths(5, 3, 85);
   c.getRange(2, 5, 200, 3).setHorizontalAlignment('center');
-  c.hideColumns(9, 2);
+  c.hideColumns(10, 1);
   c.setColumnWidths(8, 1, 110); c.getRange(2, 8, 200, 1).setHorizontalAlignment('center');
   c.setColumnWidths(11, 1, 230); c.setColumnWidths(12, 1, 140);
   c.hideColumns(13);
   c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = app deleted, phone off, or no internet.',
     'Last time the phone contacted the Sheet.', 'Automatic - do not edit.', 'Automatic - OFF means the caller switched off call log permission.', 'Automatic.']]);
+}
+
+/** A caller is Active unless the Status cell (Callers tab, column I) says Inactive. */
+function isActiveRow_(r) { return String(r[8] == null ? '' : r[8]).trim().toLowerCase() !== 'inactive'; }
+function inactiveSet_() {
+  var c = ss_().getSheetByName('Callers'), m = {};
+  if (!c || c.getLastRow() < 2) return m;
+  c.getRange(2, 1, c.getLastRow() - 1, 9).getValues().forEach(function (r) {
+    if (String(r[0]).trim() && !isActiveRow_(r)) m[String(r[0]).trim()] = 1;
+  });
+  return m;
 }
 
 function tokenMap_() {
@@ -334,7 +354,7 @@ function adminAction_(action, body) {
   }
   props.setProperty('FAILS', '0');
   var cv = ss_().getSheetByName('Callers').getDataRange().getValues().slice(1)
-    .filter(function (r) { return String(r[0]).trim() && String(r[3]).trim(); });
+    .filter(function (r) { return String(r[0]).trim() && String(r[3]).trim() && isActiveRow_(r); });
   if (action === 'login') return json_({ ok: true, callers: cv.map(function (r) { return String(r[0]).trim(); }) });
   for (var i = 0; i < cv.length; i++) if (String(cv[i][0]).trim() === String(body.caller || '').trim()) return json_({ ok: true, token: String(cv[i][3]).trim() });
   return json_({ ok: false, error: 'no_caller', msg: 'Caller not found in the Callers tab.' });
@@ -346,6 +366,7 @@ function refreshConnection_() {
   var n = c.getLastRow() - 1, v = c.getRange(2, 1, n, 15).getValues(), now = Date.now(), out = [];
   v.forEach(function (r) {
     if (!String(r[0]).trim()) { out.push(['', '']); return; }
+    if (!isActiveRow_(r)) { out.push(['INACTIVE (employee left)', String(r[11] || '-')]); return; }
     var last = Number(r[12]) || 0;
     if (!last) { out.push(['NOT CONNECTED (app never connected)', '-']); return; }
     var seen = dayKey(last) + ' ' + fmtTimeS(last);
@@ -360,7 +381,9 @@ function refreshConnection_() {
   c.setConditionalFormatRules([
     SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('NOT CONNECTED').setBackground('#f4cccc').setFontColor('#990000').setRanges([col]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('PERMISSION').setBackground('#fce5cd').setFontColor('#b45f06').setRanges([col]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('CONNECTED').setBackground('#d9ead3').setFontColor('#274e13').setRanges([col]).build()
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('CONNECTED').setBackground('#d9ead3').setFontColor('#274e13').setRanges([col]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('INACTIVE').setBackground('#d9d9d9').setFontColor('#666666').setRanges([col]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Inactive').setBackground('#d9d9d9').setFontColor('#666666').setRanges([c.getRange(2, 9, 200, 1)]).build()
   ]);
 }
 function doGet() { return json_({ ok: true, msg: 'Call tracker is running' }); }
@@ -371,9 +394,9 @@ function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).se
 function rebuildWa_() {
   var wl = ss_().getSheetByName('WhatsApp Log');
   if (!wl || wl.getLastRow() < 2) return;
-  var v = wl.getRange(2, 1, wl.getLastRow() - 1, 9).getValues(), agg = {};
+  var v = wl.getRange(2, 1, wl.getLastRow() - 1, 9).getValues(), agg = {}, gone = inactiveSet_();
   v.forEach(function (r) {
-    var ms = Number(r[8]); if (!ms) return;
+    var ms = Number(r[8]); if (!ms || gone[String(r[0]).trim()]) return;
     var d = dayKey(ms), k = d + '|' + r[0];
     var a = agg[k] = agg[k] || { d: d, who: r[0], out: 0, inn: 0, miss: 0, sec: 0, msg: 0 };
     var t = String(r[3]);
@@ -441,7 +464,7 @@ function rebuildSummary() {
   var now = Date.now(); days[dayKey(now)] = 1;
 
   var callerRows = ss_().getSheetByName('Callers').getDataRange().getDisplayValues().slice(1)
-    .filter(function (r) { return String(r[0]).trim(); })
+    .filter(function (r) { return String(r[0]).trim() && isActiveRow_(r); })
     .sort(function (a, b) { return String(a[0]).trim() < String(b[0]).trim() ? -1 : 1; });
 
   var out = [], bg = [], helper = [], band = 0;
@@ -522,7 +545,7 @@ var PAL = { blue: '#1a73e8', green: '#188038', red: '#d93025', amber: '#f9ab00' 
 
 function ensureDashboard_(force) {
   var callers = ss_().getSheetByName('Callers').getDataRange().getDisplayValues().slice(1)
-    .map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
+    .filter(isActiveRow_).map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
   var props = PropertiesService.getScriptProperties();
   var sh = ss_().getSheetByName('Dashboard');
   var key = 'v6|' + callers.join('|');
