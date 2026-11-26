@@ -162,14 +162,14 @@ var HEAD_WA_DAY = ['Date', 'Caller', 'WhatsApp calls made', 'WhatsApp calls rece
   'WhatsApp talk time (approx.)', 'WhatsApp messages received (approx.)'];
 var WA_TYPE = { CALL_OUT: 'Call made', CALL_IN: 'Call received', MISSED: 'Missed call', MSG_IN: 'Message received' };
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
-  'Total calls (SIM + WhatsApp)', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
+  'Total calls (SIM + WhatsApp)', 'Outgoing calls', 'Dialled but not answered', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
   'Calls per working hour', 'Working time (excl. breaks)', 'Total talk time on calls (SIM + WhatsApp)', 'Productivity %',
   'Total idle time (10+ min gaps with no call)', 'No. of times idle (10+ min gap)', 'Longest single idle gap',
   'First call', 'Last call ended'];
 var NOTES_SUM = [
   'Day of the calls.', 'Telecaller name (Callers tab).', 'Company / vertical (Callers tab).',
   'Shift start to shift end for this caller (set in the Callers tab).',
-  'All calls that day: normal SIM calls + WhatsApp calls (made, received and missed).', 'Calls the caller dialled.', 'Calls the caller received and answered.',
+  'All calls that day: normal SIM calls + WhatsApp calls (made, received and missed).', 'Calls the caller dialled.', 'Calls the caller dialled that were not connected (rang with no answer, switched off, or cut by the customer). These are inside Outgoing calls too, with 0 seconds of talk time.', 'Calls the caller received and answered.',
   'Calls that rang but were not answered, or were declined.',
   'Calls that started before the shift start or after the shift end.',
   'Calls made inside working time divided by working hours.',
@@ -448,10 +448,12 @@ function rebuildSummary() {
   Object.keys(days).sort().reverse().forEach(function (d) {
     callerRows.forEach(function (cr) {
       var name = String(cr[0]).trim(), shift = shiftFromRow(cr);
-      var x = computeDay(groups[d + '|' + name] || [], d, now, shift);
+      var gl = groups[d + '|' + name] || [];
+      var x = computeDay(gl, d, now, shift);
+      var notAns = gl.filter(function (c) { return c.type === 'OUTGOING' && !(c.dur > 0); }).length;
       var hrs = x.workMs / 3600000;
       out.push([prettyDay(d), name, cr[2], shift.start + ' to ' + shift.end + ' (break ' + fmtHMS(shift.breakMin * 60000).slice(0, 5) + ')',
-        x.total, x.out, x.inc, x.missed, x.outside,
+        x.total, x.out, notAns, x.inc, x.missed, x.outside,
         hrs ? Math.round(10 * (x.total - x.outside) / hrs) / 10 : 0,
         fmtHMS(x.workMs), fmtHMS(x.talkMs), x.workMs ? x.talkMs / x.workMs : '',
         fmtHMS(x.idleMs), x.gaps, fmtHMS(x.longestMs),
@@ -475,20 +477,20 @@ function rebuildSummary() {
   if (!out.length) return;
 
   var body = sum.getRange(2, 1, out.length, n);
-  sum.getRange(1, 19, 1, 5).setValues([['(helper) date', '(helper) talk sec', '(helper) idle sec', '(helper) work sec', '(helper) longest idle sec']]);
-  sum.getRange(2, 19, out.length, 5).setValues(helper);
-  sum.getRange(2, 19, out.length, 1).setNumberFormat('dd/mm/yyyy');
-  sum.hideColumns(19, 5);
-  [1, 2, 3, 4, 11, 12, 14, 16, 17, 18].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); });
+  sum.getRange(1, 20, 1, 5).setValues([['(helper) date', '(helper) talk sec', '(helper) idle sec', '(helper) work sec', '(helper) longest idle sec']]);
+  sum.getRange(2, 20, out.length, 5).setValues(helper);
+  sum.getRange(2, 20, out.length, 1).setNumberFormat('dd/mm/yyyy');
+  sum.hideColumns(20, 5);
+  [1, 2, 3, 4, 12, 13, 15, 17, 18, 19].forEach(function (c) { sum.getRange(2, c, out.length, 1).setNumberFormat('@'); });
   body.setValues(out);
   body.setBackgrounds(bg).setVerticalAlignment('middle');
   sum.getRange(2, 5, out.length, n - 4).setHorizontalAlignment('center');
-  sum.getRange(2, 10, out.length, 1).setNumberFormat('0.0');
-  sum.getRange(2, 13, out.length, 1).setNumberFormat('0%');
+  sum.getRange(2, 11, out.length, 1).setNumberFormat('0.0');
+  sum.getRange(2, 14, out.length, 1).setNumberFormat('0%');
   sum.getRange(2, 1, out.length, 2).setFontWeight('bold');
   sum.getRange(2, 1, out.length, n).setBorder(null, null, true, null, null, null, '#cccccc', SpreadsheetApp.BorderStyle.SOLID);
 
-  var prod = sum.getRange(2, 13, out.length, 1);
+  var prod = sum.getRange(2, 14, out.length, 1);
   sum.setConditionalFormatRules([
     SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(CFG.PROD_GOOD).setBackground('#d9ead3').setFontColor('#274e13').setRanges([prod]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenNumberLessThan(CFG.PROD_LOW).setBackground('#f4cccc').setFontColor('#990000').setRanges([prod]).build()
@@ -502,12 +504,13 @@ function rebuildSummary() {
 
 // ---------- DASHBOARD TAB (pick dates in A1 and B1) ----------
 var DASH_CHARTS = 1;   // one chart only: calls by hour of the day
-var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (SIM + WhatsApp)', 'Outgoing calls',
+var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (SIM + WhatsApp)', 'Outgoing calls', 'Dialled but not answered',
   'Incoming calls', 'Missed / Rejected calls', 'Total talk time on calls (SIM + WhatsApp)', 'Total idle time (10+ min gaps with no call)',
   'No. of times idle (10+ min gap)', 'Longest single idle gap', 'First call', 'Last call ended'];
 var DASH_NOTES = ['Day of the calls.', 'Telecaller name.', 'Company / vertical.', 'Shift start to end, and the total break that is deducted.',
   'Every call that day, SIM and WhatsApp: calls the caller made + calls the caller received + missed/rejected calls.',
   'Calls the caller dialled to customers (includes calls that were not picked up).',
+  'Calls the caller dialled that were NOT connected: no answer, switched off or cut by the customer. Already counted inside Outgoing calls.',
   'Calls from customers that the caller picked up.',
   'Missed = a customer called and the caller did not pick up. Rejected = a customer called and the caller cut the call. (A call the caller dialled that nobody answered is counted under Outgoing.)',
   'Total time spent talking on connected calls (hh:mm:ss).',
@@ -549,7 +552,7 @@ function buildDashboard_(callers) {
 
   var DS = "'Daily Summary'!", LOG = "'Call Log'!";
   function rng(col) { return DS + '$' + col + '$2:$' + col + '$1000'; }
-  var between = rng('S') + ',">="&$Q$1,' + rng('S') + ',"<="&$Q$2';
+  var between = rng('T') + ',">="&$Q$1,' + rng('T') + ',"<="&$Q$2';
   var n = callers.length;
 
   // ===== A1 / B1: the two dates you choose =====
@@ -580,9 +583,9 @@ function buildDashboard_(callers) {
   sh.getRange('A3:E3').setValues([['Total calls (SIM + WhatsApp)', 'Total talk time', 'Total idle time', 'Overall productivity', 'Days selected']])
     .setFontWeight('bold').setFontColor('#ffffff').setBackground('#1a73e8').setHorizontalAlignment('center').setWrap(true).setVerticalAlignment('middle');
   sh.getRange('A4').setFormula('=SUMIFS(' + rng('E') + ',' + between + ')');
-  sh.getRange('B4').setFormula('=TEXT(SUMIFS(' + rng('T') + ',' + between + ')/86400,"[h]:mm:ss")');
-  sh.getRange('C4').setFormula('=TEXT(SUMIFS(' + rng('U') + ',' + between + ')/86400,"[h]:mm:ss")');
-  sh.getRange('D4').setFormula('=IFERROR(SUMIFS(' + rng('T') + ',' + between + ')/SUMIFS(' + rng('V') + ',' + between + '),0)');
+  sh.getRange('B4').setFormula('=TEXT(SUMIFS(' + rng('U') + ',' + between + ')/86400,"[h]:mm:ss")');
+  sh.getRange('C4').setFormula('=TEXT(SUMIFS(' + rng('V') + ',' + between + ')/86400,"[h]:mm:ss")');
+  sh.getRange('D4').setFormula('=IFERROR(SUMIFS(' + rng('U') + ',' + between + ')/SUMIFS(' + rng('W') + ',' + between + '),0)');
   sh.getRange('E4').setFormula('=$Q$2-$Q$1+1');
   sh.getRange('A4:E4').setFontSize(17).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
     .setBackground('#e8f0fe').setFontColor('#174ea6').setBorder(true, true, true, true, true, true, '#c6dafc', SpreadsheetApp.BorderStyle.SOLID);
@@ -640,13 +643,13 @@ function buildDashboard_(callers) {
     .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
   sh.getRange(T, 1, 1, DASH_HEAD.length).setNotes([DASH_NOTES]);
   sh.setRowHeight(T, 62);
-  sh.getRange(T + 1, 1).setFormula('=IFERROR(FILTER({' + DS + 'A2:H1000,' + DS + 'L2:L1000,' + DS + 'N2:R1000},' +
-    '(' + rng('S') + '>=$Q$1)*(' + rng('S') + '<=$Q$2)*(' + rng('S') + '<>"")),"No calls found for these dates")');
+  sh.getRange(T + 1, 1).setFormula('=IFERROR(FILTER({' + DS + 'A2:I1000,' + DS + 'M2:M1000,' + DS + 'O2:S1000},' +
+    '(' + rng('T') + '>=$Q$1)*(' + rng('T') + '<=$Q$2)*(' + rng('T') + '<>"")),"No calls found for these dates")');
   sh.getRange(T + 1, 1, 400, DASH_HEAD.length).setHorizontalAlignment('center').setVerticalAlignment('middle');
   sh.getRange(T + 1, 1, 400, 2).setFontWeight('bold');
-  var widths = [130, 100, 100, 150, 100, 90, 90, 100, 110, 130, 150, 110, 95, 110];
+  var widths = [130, 100, 100, 150, 100, 90, 105, 90, 100, 110, 130, 150, 110, 95, 110];
   widths.forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
-  sh.setColumnWidth(15, 30);
+  sh.setColumnWidth(16, 30);
   sh.hideColumns(16, 4);
 
   var rules = [
