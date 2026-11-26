@@ -20,7 +20,7 @@ import java.util.Locale
 object Syncer {
 
     private const val HOUR = 3600_000L
-    const val VERSION = "1.2"
+    const val VERSION = "1.3"
 
     fun run(ctx: Context): String {
         val p = ctx.getSharedPreferences("ct", Context.MODE_PRIVATE)

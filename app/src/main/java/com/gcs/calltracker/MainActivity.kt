@@ -33,6 +33,9 @@ import java.util.concurrent.TimeUnit
 class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
+    private var unlocked = false          // true only while the admin is inside the app
+    private var keepUnlocked = false      // true while the admin visits an Android settings page and comes back
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,7 +45,19 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        keepUnlocked = false
         if (prefs.getBoolean("enrolled", false)) render()
+    }
+
+    /** Every time the app leaves the screen it locks again, so a caller who opens it must log in as admin. */
+    override fun onStop() {
+        super.onStop()
+        if (!keepUnlocked) unlocked = false
+    }
+
+    private fun openSettings(i: Intent) {
+        keepUnlocked = true
+        try { startActivity(i) } catch (e: Exception) { keepUnlocked = false }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -68,7 +83,47 @@ class MainActivity : Activity() {
     }
 
     private fun render() {
-        if (prefs.getBoolean("enrolled", false)) statusScreen() else setupScreen()
+        if (!prefs.getBoolean("enrolled", false)) setupScreen()
+        else if (unlocked) statusScreen()
+        else lockScreen()
+    }
+
+    // ---------------- Locked screen: shown to anyone who opens an already-connected app ----------------
+    private fun lockScreen() {
+        val root = newRoot()
+        root.addView(label("Call Tracker", 22f))
+        root.addView(label("This app is running in the background and sends the call log automatically. Only the manager can open its settings."))
+        root.addView(label("Admin ID"))
+        val idBox = EditText(this).apply { inputType = InputType.TYPE_CLASS_TEXT; hint = "Admin ID" }
+        root.addView(idBox)
+        root.addView(label("Admin password"))
+        val pwBox = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Admin password"
+        }
+        root.addView(pwBox)
+        val msg = label("")
+        val unlock = Button(this).apply { text = "Unlock (admin only)" }
+        unlock.setOnClickListener {
+            val id = idBox.text.toString().trim()
+            val pw = pwBox.text.toString()
+            if (id.isEmpty() || pw.isEmpty()) { msg.text = "Enter the admin ID and password."; return@setOnClickListener }
+            val url = prefs.getString("url", "") ?: ""
+            msg.text = "Checking..."
+            Thread {
+                val j = parse(Syncer.post(url, JSONObject().put("action", "login").put("adminId", id).put("adminPass", pw).toString()))
+                runOnUiThread {
+                    when {
+                        j == null -> msg.text = "Cannot check right now. Internet is needed to unlock."
+                        !j.optBoolean("ok") -> msg.text = j.optString("msg", "Not allowed.")
+                        else -> { unlocked = true; render() }
+                    }
+                }
+            }.start()
+        }
+        root.addView(unlock)
+        root.addView(msg)
+        show(root)
     }
 
     // ---------------- Screen 1: admin setup ----------------
@@ -149,6 +204,7 @@ class MainActivity : Activity() {
                         .putString("caller", caller)
                         .putBoolean("enrolled", true)
                         .apply()
+                    unlocked = true
                     schedule()
                     requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1)
                     Thread { Syncer.run(applicationContext); runOnUiThread { render() } }.start()
@@ -181,7 +237,7 @@ class MainActivity : Activity() {
             root.addView(Button(this).apply {
                 text = "Allow WhatsApp tracking"
                 setOnClickListener {
-                    try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) {}
+                    openSettings(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 }
             })
         } else {
@@ -202,7 +258,7 @@ class MainActivity : Activity() {
         root.addView(Button(this).apply {
             text = "Battery: set to Unrestricted"
             setOnClickListener {
-                try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e: Exception) {}
+                openSettings(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
         })
         root.addView(status)
