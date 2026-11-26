@@ -165,7 +165,7 @@ class MainActivity : Activity() {
         val root = newRoot()
         root.addView(label("Call Tracker", 22f))
         root.addView(label("Connected as: ${prefs.getString("caller", "")}", 18f))
-        root.addView(label("Your manager can see your call time, number, direction and duration. Call audio and messages are never recorded."))
+        root.addView(label("Your manager can see your call time, number, direction and duration. Call audio and message text are never recorded. For WhatsApp only call time, duration and message counts are counted."))
 
         val granted = checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
         if (!granted) {
@@ -174,6 +174,18 @@ class MainActivity : Activity() {
                 text = "Allow call log"
                 setOnClickListener { requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1) }
             })
+        }
+
+        if (!WaListener.isEnabled(this)) {
+            root.addView(label("WhatsApp tracking is OFF. Tap the button, find Call Tracker in the list and switch it ON."))
+            root.addView(Button(this).apply {
+                text = "Allow WhatsApp tracking"
+                setOnClickListener {
+                    try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) {}
+                }
+            })
+        } else {
+            root.addView(label("WhatsApp tracking: ON (calls and incoming message counts only)."))
         }
 
         val status = label("Last result: " + prefs.getString("status", "nothing sent yet"))

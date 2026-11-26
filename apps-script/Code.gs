@@ -155,8 +155,12 @@ function genTestCalls(key) {
 // ---------- GOOGLE SHEET PART ----------
 var HEAD_LOG = ['Caller', 'Date', 'Start time', 'Number', 'Direction', 'Duration (sec)', 'Key', 'StartMs'];
 var HEAD_CALLERS = ['Caller', 'Phone number', 'Company / Vertical', 'Token (secret)',
-  'Shift start', 'Shift end', 'Total break (hh:mm)', '(not used)', '(not used)', '(not used)',
+  'Shift start', 'Shift end', 'Total break (hh:mm)', 'WhatsApp tracking (auto)', '(not used)', '(not used)',
   'App status', 'Last seen', 'LastSeenMs (auto)', 'Call log permission (auto)', 'App version (auto)'];
+var HEAD_WA = ['Caller', 'Date', 'Time', 'Type', 'Voice / Video', 'Duration (sec)', 'Count', 'Key', 'StartMs'];
+var HEAD_WA_DAY = ['Date', 'Caller', 'WhatsApp calls made', 'WhatsApp calls received', 'WhatsApp missed calls',
+  'WhatsApp talk time (approx.)', 'WhatsApp messages received (approx.)'];
+var WA_TYPE = { CALL_OUT: 'Call made', CALL_IN: 'Call received', MISSED: 'Missed call', MSG_IN: 'Message received' };
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
   'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
   'Calls per working hour', 'Working time (excl. breaks)', 'Total talk time on calls', 'Productivity %',
@@ -233,7 +237,8 @@ function updateCallersTab() {
     'Total break per day (lunch + tea together), e.g. 01:00 = 1 hour, 00:45 = 45 minutes. Type - if none.']]);
   c.setColumnWidths(5, 3, 85);
   c.getRange(2, 5, 200, 3).setHorizontalAlignment('center');
-  c.hideColumns(8, 3);
+  c.hideColumns(9, 2);
+  c.setColumnWidths(8, 1, 110); c.getRange(2, 8, 200, 1).setHorizontalAlignment('center');
   c.setColumnWidths(11, 1, 230); c.setColumnWidths(12, 1, 140);
   c.hideColumns(13);
   c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = app deleted, phone off, or no internet.',
@@ -275,6 +280,21 @@ function syncAction_(body) {
     rows.push([caller, dayKey(x.time), fmtTimeS(x.time), x.number, x.type, x.duration, key, x.time]);
   });
   if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD_LOG.length).setValues(rows);
+
+  // WhatsApp events (notification-based: calls, missed calls, incoming message counts)
+  if (body.wa && body.wa.length) {
+    var wl = sheet_('WhatsApp Log', HEAD_WA), wex = {};
+    if (wl.getLastRow() > 1) wl.getRange(2, 8, wl.getLastRow() - 1, 1).getValues().forEach(function (r) { wex[r[0]] = 1; });
+    var wrows = [];
+    body.wa.forEach(function (x) {
+      var k = caller + '|' + x.time + '|' + x.kind; if (wex[k] || !WA_TYPE[x.kind]) return;
+      wex[k] = 1;
+      wrows.push([caller, dayKey(x.time), fmtTimeS(x.time), WA_TYPE[x.kind], x.kind === 'MSG_IN' ? '' : (x.video ? 'Video' : 'Voice'),
+        Number(x.duration) || 0, Number(x.count) || 1, k, x.time]);
+    });
+    if (wrows.length) wl.getRange(wl.getLastRow() + 1, 1, wrows.length, HEAD_WA.length).setValues(wrows);
+  }
+  if (body.waAccess !== undefined) c.getRange(rowIdx, 8).setValue(body.waAccess ? 'ON' : 'OFF - ask caller to allow');
 
   // heartbeat: proves the app is installed and running on this caller's phone
   c.getRange(rowIdx, 13, 1, 3).setValues([[Date.now(), body.perm === false ? 'OFF' : 'OK', String(body.ver || '')]]);
@@ -347,8 +367,43 @@ function doGet() { return json_({ ok: true, msg: 'Call tracker is running' }); }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 
 /** Rebuilds Daily Summary (newest day first, callers A-Z). Also tidies Date/Time in Call Log to dd-Mon-yyyy and hh:mm:ss. */
+/** Builds the 'WhatsApp Daily' tab from 'WhatsApp Log' (newest day first). */
+function rebuildWa_() {
+  var wl = ss_().getSheetByName('WhatsApp Log');
+  if (!wl || wl.getLastRow() < 2) return;
+  var v = wl.getRange(2, 1, wl.getLastRow() - 1, 9).getValues(), agg = {};
+  v.forEach(function (r) {
+    var ms = Number(r[8]); if (!ms) return;
+    var d = dayKey(ms), k = d + '|' + r[0];
+    var a = agg[k] = agg[k] || { d: d, who: r[0], out: 0, inn: 0, miss: 0, sec: 0, msg: 0 };
+    var t = String(r[3]);
+    if (t === WA_TYPE.CALL_OUT) { a.out++; a.sec += Number(r[5]) || 0; }
+    else if (t === WA_TYPE.CALL_IN) { a.inn++; a.sec += Number(r[5]) || 0; }
+    else if (t === WA_TYPE.MISSED) a.miss++;
+    else if (t === WA_TYPE.MSG_IN) a.msg += Number(r[6]) || 1;
+  });
+  var list = Object.keys(agg).map(function (k) { return agg[k]; });
+  list.sort(function (x, y) { return x.d < y.d ? 1 : x.d > y.d ? -1 : (x.who < y.who ? -1 : 1); });
+  var sh = ss_().getSheetByName('WhatsApp Daily') || ss_().insertSheet('WhatsApp Daily');
+  sh.clear();
+  sh.getRange(1, 1, 1, HEAD_WA_DAY.length).setValues([HEAD_WA_DAY]).setFontWeight('bold').setBackground('#d9ead3')
+    .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sh.getRange(1, 1, 1, HEAD_WA_DAY.length).setNotes([['Day.', 'Telecaller.', 'WhatsApp calls the caller started (calling a customer).',
+    'WhatsApp calls the caller received and answered.', 'WhatsApp calls that rang and were not answered.',
+    'Total time in WhatsApp calls (hh:mm:ss). Approximate: measured from WhatsApp\'s call notification.',
+    'Incoming WhatsApp messages only (notification count). Messages the caller sends cannot be counted. Approximate.']]);
+  sh.setFrozenRows(1); sh.setRowHeight(1, 48);
+  if (list.length) {
+    var rows = list.map(function (a) { return [prettyDay(a.d), a.who, a.out, a.inn, a.miss, fmtHMS(a.sec * 1000), a.msg]; });
+    sh.getRange(2, 1, rows.length, 6).setNumberFormat('@');
+    sh.getRange(2, 1, rows.length, HEAD_WA_DAY.length).setValues(rows).setHorizontalAlignment('center');
+  }
+  sh.setColumnWidths(1, 2, 120); sh.setColumnWidths(3, 5, 130);
+}
+
 function rebuildSummary() {
   refreshConnection_();
+  rebuildWa_();
   var log = sheet_('Call Log', HEAD_LOG), sum = sheet_('Daily Summary', HEAD_SUM);
   var v = log.getLastRow() > 1 ? log.getRange(2, 1, log.getLastRow() - 1, 8).getValues() : [];
 

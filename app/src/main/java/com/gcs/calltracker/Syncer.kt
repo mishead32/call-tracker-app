@@ -20,7 +20,7 @@ import java.util.Locale
 object Syncer {
 
     private const val HOUR = 3600_000L
-    const val VERSION = "1.1"
+    const val VERSION = "1.2"
 
     fun run(ctx: Context): String {
         val p = ctx.getSharedPreferences("ct", Context.MODE_PRIVATE)
@@ -33,6 +33,9 @@ object Syncer {
         // First run: last 36 hours. Later runs: since last sent call (minus 1 hour overlap; the Sheet removes duplicates).
         val since = p.getLong("last", System.currentTimeMillis() - 36 * HOUR) - HOUR
 
+        val waOn = WaListener.isEnabled(ctx)
+        if (waOn) WaListener.rebind(ctx)
+        val waEvents = WaQueue.peek(ctx)
         val calls = JSONArray()
         var newest = p.getLong("last", 0L)
         if (perm) {
@@ -73,20 +76,22 @@ object Syncer {
             for (j in i until end) chunk.put(calls.get(j))
             val body = JSONObject()
                 .put("action", "sync").put("token", token).put("calls", chunk)
-                .put("perm", perm).put("ver", VERSION).toString()
+                .put("perm", perm).put("ver", VERSION).put("waAccess", waOn)
+                .put("wa", if (i == 0) waEvents else JSONArray()).toString()
             val reply = post(url, body) ?: return finish(p, "Could not reach the Sheet. Check internet. Will retry.")
             if (!reply.contains("\"ok\":true")) return finish(p, "Sheet said: ${reply.take(120)}")
             added += Regex("\"added\":(\\d+)").find(reply)?.groupValues?.get(1)?.toInt() ?: 0
             i = end
         } while (i < total)
 
+        WaQueue.drop(ctx, waEvents.length())
         if (perm && newest > 0) p.edit().putLong("last", newest).apply()
         return finish(
             p,
             when {
                 !perm -> "Call log permission is OFF. Please allow it."
-                total == 0 -> "Connected. No new calls."
-                else -> "Sent $total calls ($added new)."
+                total == 0 -> "Connected. No new calls." + (if (waEvents.length() > 0) " WhatsApp events sent: ${waEvents.length()}." else "")
+                else -> "Sent $total calls ($added new)." + (if (waEvents.length() > 0) " WhatsApp events sent: ${waEvents.length()}." else "")
             }
         )
     }
