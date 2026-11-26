@@ -162,14 +162,14 @@ var HEAD_WA_DAY = ['Date', 'Caller', 'WhatsApp calls made', 'WhatsApp calls rece
   'WhatsApp talk time (approx.)', 'WhatsApp messages received (approx.)'];
 var WA_TYPE = { CALL_OUT: 'Call made', CALL_IN: 'Call received', MISSED: 'Missed call', MSG_IN: 'Message received' };
 var HEAD_SUM = ['Date', 'Caller', 'Company', 'Shift timing',
-  'Total calls', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
-  'Calls per working hour', 'Working time (excl. breaks)', 'Total talk time on calls', 'Productivity %',
+  'Total calls (SIM + WhatsApp)', 'Outgoing calls', 'Incoming calls', 'Missed / Rejected calls', 'Calls outside shift timing',
+  'Calls per working hour', 'Working time (excl. breaks)', 'Total talk time on calls (SIM + WhatsApp)', 'Productivity %',
   'Total idle time (10+ min gaps with no call)', 'No. of times idle (10+ min gap)', 'Longest single idle gap',
   'First call', 'Last call ended'];
 var NOTES_SUM = [
   'Day of the calls.', 'Telecaller name (Callers tab).', 'Company / vertical (Callers tab).',
   'Shift start to shift end for this caller (set in the Callers tab).',
-  'All calls in the phone call log that day.', 'Calls the caller dialled.', 'Calls the caller received and answered.',
+  'All calls that day: normal SIM calls + WhatsApp calls (made, received and missed).', 'Calls the caller dialled.', 'Calls the caller received and answered.',
   'Calls that rang but were not answered, or were declined.',
   'Calls that started before the shift start or after the shift end.',
   'Calls made inside working time divided by working hours.',
@@ -426,6 +426,18 @@ function rebuildSummary() {
     (groups[k] = groups[k] || []).push({ start: startMs, dur: Number(r[5]) || 0, type: String(r[4]) });
     days[d] = 1;
   });
+  // WhatsApp calls count exactly like SIM calls (made / received / missed). WhatsApp messages are not calls and are skipped.
+  var wlog = ss_().getSheetByName('WhatsApp Log');
+  if (wlog && wlog.getLastRow() > 1) {
+    var WMAP = {}; WMAP[WA_TYPE.CALL_OUT] = 'OUTGOING'; WMAP[WA_TYPE.CALL_IN] = 'INCOMING'; WMAP[WA_TYPE.MISSED] = 'MISSED';
+    wlog.getRange(2, 1, wlog.getLastRow() - 1, 9).getValues().forEach(function (r) {
+      var ty = WMAP[String(r[3])], ms = Number(r[8]);
+      if (!ty || !ms) return;
+      var d2 = dayKey(ms), k2 = d2 + '|' + String(r[0]).trim();
+      (groups[k2] = groups[k2] || []).push({ start: ms, dur: Number(r[5]) || 0, type: ty });
+      days[d2] = 1;
+    });
+  }
   var now = Date.now(); days[dayKey(now)] = 1;
 
   var callerRows = ss_().getSheetByName('Callers').getDataRange().getDisplayValues().slice(1)
@@ -490,11 +502,11 @@ function rebuildSummary() {
 
 // ---------- DASHBOARD TAB (pick dates in A1 and B1) ----------
 var DASH_CHARTS = 1;   // one chart only: calls by hour of the day
-var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (made + received)', 'Outgoing calls',
-  'Incoming calls', 'Missed / Rejected calls', 'Total talk time on calls', 'Total idle time (10+ min gaps with no call)',
+var DASH_HEAD = ['Date', 'Caller name', 'Company', 'Shift timing', 'Total calls (SIM + WhatsApp)', 'Outgoing calls',
+  'Incoming calls', 'Missed / Rejected calls', 'Total talk time on calls (SIM + WhatsApp)', 'Total idle time (10+ min gaps with no call)',
   'No. of times idle (10+ min gap)', 'Longest single idle gap', 'First call', 'Last call ended'];
 var DASH_NOTES = ['Day of the calls.', 'Telecaller name.', 'Company / vertical.', 'Shift start to end, and the total break that is deducted.',
-  'Every call on the phone that day: calls the caller made + calls the caller received + missed/rejected calls.',
+  'Every call that day, SIM and WhatsApp: calls the caller made + calls the caller received + missed/rejected calls.',
   'Calls the caller dialled to customers (includes calls that were not picked up).',
   'Calls from customers that the caller picked up.',
   'Missed = a customer called and the caller did not pick up. Rejected = a customer called and the caller cut the call. (A call the caller dialled that nobody answered is counted under Outgoing.)',
@@ -565,7 +577,7 @@ function buildDashboard_(callers) {
   // ===== title + KPI cards =====
   sh.getRange('A2').setFormula('="TELECALLER REPORT  |  "&TEXT($Q$1,"dd/mm/yyyy")&IF($Q$2<>$Q$1," to "&TEXT($Q$2,"dd/mm/yyyy"),"")')
     .setFontSize(15).setFontWeight('bold').setFontColor('#174ea6');
-  sh.getRange('A3:E3').setValues([['Total calls (made + received)', 'Total talk time', 'Total idle time', 'Overall productivity', 'Days selected']])
+  sh.getRange('A3:E3').setValues([['Total calls (SIM + WhatsApp)', 'Total talk time', 'Total idle time', 'Overall productivity', 'Days selected']])
     .setFontWeight('bold').setFontColor('#ffffff').setBackground('#1a73e8').setHorizontalAlignment('center').setWrap(true).setVerticalAlignment('middle');
   sh.getRange('A4').setFormula('=SUMIFS(' + rng('E') + ',' + between + ')');
   sh.getRange('B4').setFormula('=TEXT(SUMIFS(' + rng('T') + ',' + between + ')/86400,"[h]:mm:ss")');
