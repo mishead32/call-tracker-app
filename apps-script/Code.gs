@@ -15,7 +15,7 @@ var CFG = {
   IDLE_MIN: 10,           // gap with no call that counts as idle
   PROD_GOOD: 0.40,        // productivity at or above this = green
   PROD_LOW: 0.20,         // productivity below this = red
-  CONNECT_MIN: 60         // phone not heard from for this many minutes = NOT CONNECTED
+  CONNECT_MIN: 60, STATUS_ONLY_IN_SHIFT: false         // phone not heard from for this many minutes = NOT CONNECTED
 };
 var IST = 330 * 60000; // India time = UTC + 5:30
 
@@ -379,7 +379,7 @@ function refreshConnection_() {
     var seen = dayKey(last) + ' ' + fmtTimeS(last);
     var recent = now - last <= CFG.CONNECT_MIN * 60000;
     var st = recent ? (String(r[13]) === 'OFF' ? 'PERMISSION OFF (call log not allowed)' : 'CONNECTED')
-      : (onDuty_(now, shiftFromRow(r.map(String)))
+      : (!CFG.STATUS_ONLY_IN_SHIFT || onDuty_(now, shiftFromRow(r.map(String)))
         ? 'NOT CONNECTED (app deleted, phone off or no internet)'
         : 'OFF DUTY (not expected to sync now)');
     out.push([st, seen]);
