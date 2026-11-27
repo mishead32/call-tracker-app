@@ -550,7 +550,7 @@ var DASH_NOTES = ['Day of the calls.', 'Telecaller name.', 'Company / vertical.'
   'Add up every gap of 10+ minutes with no call. Break time is taken out of the longest gaps first.',
   'How many separate times the caller sat idle for 10+ minutes.',
   'The biggest single gap with no call that day.', 'Time the first call started.', 'Time the last call ended.'];
-var HEAT_FIRST_HOUR = 6, HEAT_HOURS = 16;           // hour table covers 06:00 to 22:00 (06:00-21:59); calls outside go in 'Other hours'
+var HEAT_FIRST_HOUR = 6, HEAT_HOURS = 17;           // hour columns 06:00 to 22:00 (22:00 = 10:00-10:59 PM); calls outside go in "Other hours"
 var PAL = { blue: '#1a73e8', green: '#188038', red: '#d93025', amber: '#f9ab00' };
 
 function ensureDashboard_(force) {
