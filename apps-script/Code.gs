@@ -550,7 +550,7 @@ var DASH_NOTES = ['Day of the calls.', 'Telecaller name.', 'Company / vertical.'
   'Add up every gap of 10+ minutes with no call. Break time is taken out of the longest gaps first.',
   'How many separate times the caller sat idle for 10+ minutes.',
   'The biggest single gap with no call that day.', 'Time the first call started.', 'Time the last call ended.'];
-var HEAT_FIRST_HOUR = 8, HEAT_HOURS = 15;           // hour table covers 08:00 to 22:59; calls outside go in 'Other hours'
+var HEAT_FIRST_HOUR = 6, HEAT_HOURS = 16;           // hour table covers 06:00 to 22:00 (06:00-21:59); calls outside go in 'Other hours'
 var PAL = { blue: '#1a73e8', green: '#188038', red: '#d93025', amber: '#f9ab00' };
 
 function ensureDashboard_(force) {
@@ -658,7 +658,6 @@ function buildDashboard_(callers) {
     // last row: total of all callers
     var tr = H0 + 2 + n, tf = [];
     for (var c4 = 0; c4 < HEAT_HOURS + 2; c4++) { var L4 = colL_(2 + c4); tf.push('=SUM(' + L4 + (H0 + 2) + ':' + L4 + (H0 + 1 + n) + ')'); }
-    tf.push('=SUM(B' + tr + ':' + colL_(HEAT_HOURS + 2) + tr + ')');
     sh.getRange(tr, 1).setValue('TOTAL (all callers)');
     sh.getRange(tr, 2, 1, HEAT_HOURS + 2).setFormulas([tf]);
     sh.getRange(tr, 1, 1, NH).setFontWeight('bold').setBackground('#d2e3fc').setHorizontalAlignment('center')
