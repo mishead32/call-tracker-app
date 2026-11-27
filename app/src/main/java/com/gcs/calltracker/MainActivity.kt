@@ -46,7 +46,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         keepUnlocked = false
-        if (prefs.getBoolean("enrolled", false)) render()
+        if (prefs.getBoolean("enrolled", false)) { ServiceStarter.start(this); render() }
     }
 
     /** Every time the app leaves the screen it locks again, so a caller who opens it must log in as admin. */
@@ -206,7 +206,8 @@ class MainActivity : Activity() {
                         .apply()
                     unlocked = true
                     schedule()
-                    requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), 1)
+                    requestPermissions(if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_CALL_LOG, Manifest.permission.POST_NOTIFICATIONS) else arrayOf(Manifest.permission.READ_CALL_LOG), 1)
+                    ServiceStarter.start(applicationContext)
                     Thread { Syncer.run(applicationContext); runOnUiThread { render() } }.start()
                     render()
                 }
@@ -256,13 +257,16 @@ class MainActivity : Activity() {
             }
         })
         root.addView(Button(this).apply {
-            text = "Battery: set to Unrestricted"
+            text = "Battery: allow background running"
             setOnClickListener {
-                openSettings(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                openSettings(
+                    if (android.os.Build.VERSION.SDK_INT >= 23)
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))
+                    else Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
         })
         root.addView(status)
-        root.addView(label("Please keep this app installed and the call log permission allowed. The app sends automatically every 15 minutes."))
+        root.addView(label("Please keep this app installed and the call log permission allowed. The app sends automatically after every call and every 15 minutes. The small \"Call Tracker is running\" notification keeps it working, so please do not turn it off."))
         show(root)
     }
 
