@@ -678,10 +678,11 @@ function buildDashboard_(callers) {
     if (n) sh.getRange(H0 + 2 + h3, 41, 1, n).setFormulas([fr]);
   }
   sh.getRange(H0 + 2, 40, HEAT_HOURS, n + 1).setFontColor('#999999');
+  if (n) sh.getRange(H0 + 2, 41, HEAT_HOURS, n).setNumberFormat('0');   // plain numbers (not dates) so the chart axis shows 0, 5, 10...
   sh.setColumnWidth(40, 70);
 
   // ===== detailed table =====
-  var T = H0 + 2 + n + 3 + 24;   // 24 rows of room for the hourly chart
+  var T = H0 + 2 + n + 3 + 34;   // 34 rows of room for the big hourly chart
   sh.getRange(T - 1, 1).setValue('DETAILED REPORT').setFontWeight('bold').setFontSize(16).setFontColor('#174ea6');
   sh.getRange(T, 1, 1, DASH_HEAD.length).setValues([DASH_HEAD]).setFontWeight('bold').setFontSize(13).setFontColor('#ffffff').setBackground('#1a73e8')
     .setWrap(true).setHorizontalAlignment('center').setVerticalAlignment('middle');
@@ -714,7 +715,7 @@ function buildDashboard_(callers) {
     var ser = {}; for (var k2 = 0; k2 < n; k2++) ser[k2] = {};
     addChartSafe_(sh, { type: Charts.ChartType.COLUMN, title: 'Time-wise calls by caller',
       ranges: [sh.getRange(H0 + 1, 40, HEAT_HOURS + 1, n + 1)],
-      colors: cols, series: ser, hTitle: 'Hour of the day', width: 1100, height: 440, row: H0 + 2 + n + 2, col: 1 });
+      colors: cols, series: ser, hTitle: 'Hour of the day', vTitle: 'Number of calls', width: 1900, height: 640, row: H0 + 2 + n + 2, col: 1 });
   }
   if (isNew) ss_().setActiveSheet(sh);
 }
@@ -728,12 +729,12 @@ function addChart_(sh, spec, fancy) {
     .setOption('colors', spec.colors).setOption('legend', { position: 'bottom' });
   if (fancy) {
     b.setOption('fontName', 'Arial')
-      .setOption('titleTextStyle', { color: '#202124', fontSize: 18, bold: true })
+      .setOption('titleTextStyle', { color: '#202124', fontSize: 22, bold: true })
       .setOption('backgroundColor', { fill: '#ffffff', stroke: '#dadce0', strokeWidth: 1 })
-      .setOption('legend', { position: 'bottom', textStyle: { color: '#5f6368', fontSize: 14 } })
-      .setOption('hAxis', { textStyle: { color: '#5f6368', fontSize: 13 }, title: spec.hTitle || '', titleTextStyle: { color: '#5f6368', italic: false, fontSize: 13 } })
-      .setOption('vAxis', spec.vAxis || { textStyle: { color: '#5f6368', fontSize: 13 }, gridlines: { color: '#e8eaed' }, minValue: 0 })
-      .setOption('bar', { groupWidth: '55%' });
+      .setOption('legend', { position: 'bottom', textStyle: { color: '#5f6368', fontSize: 16 } })
+      .setOption('hAxis', { textStyle: { color: '#5f6368', fontSize: 15 }, title: spec.hTitle || '', titleTextStyle: { color: '#5f6368', italic: false, fontSize: 15 } })
+      .setOption('vAxis', spec.vAxis || { textStyle: { color: '#5f6368', fontSize: 15 }, gridlines: { color: '#e8eaed' }, minValue: 0, format: '0', title: spec.vTitle || '', titleTextStyle: { color: '#5f6368', italic: false, fontSize: 15 } })
+      .setOption('bar', { groupWidth: '75%' });
     if (spec.vAxes) b.setOption('vAxes', spec.vAxes);
     if (spec.series) b.setOption('series', spec.series);
   }
