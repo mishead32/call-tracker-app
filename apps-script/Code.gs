@@ -75,6 +75,13 @@ function shiftFromRow(r) {
     breakMin: b === null ? CFG.BREAK_MIN : b
   };
 }
+/** True when the phone should be syncing: from 1 hour after shift start until 30 minutes after shift end (IST). */
+function onDuty_(nowMs, shift) {
+  var d = new Date(nowMs + IST), nowMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+  var a = hmMs(shift.start) / 60000, b = hmMs(shift.end) / 60000;
+  if (b <= a) return true;                       // night shift crossing midnight: always judge
+  return nowMin >= a + 60 && nowMin <= b + 30;
+}
 function defaultShift() { return { start: CFG.SHIFT_START, end: CFG.SHIFT_END, breakMin: CFG.BREAK_MIN }; }
 
 /**
@@ -250,7 +257,7 @@ function updateCallersTab() {
   c.setColumnWidths(8, 1, 110); c.getRange(2, 8, 200, 1).setHorizontalAlignment('center');
   c.setColumnWidths(11, 1, 230); c.setColumnWidths(12, 1, 140);
   c.hideColumns(13);
-  c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = app deleted, phone off, or no internet.',
+  c.getRange(1, 11, 1, 5).setNotes([['CONNECTED = this caller\'s phone sent data recently. NOT CONNECTED = during the shift, no signal for over an hour (app deleted, phone off, or no internet). OFF DUTY = outside shift hours, so no signal is expected.',
     'Last time the phone contacted the Sheet.', 'Automatic - do not edit.', 'Automatic - OFF means the caller switched off call log permission.', 'Automatic.']]);
 }
 
@@ -371,8 +378,10 @@ function refreshConnection_() {
     if (!last) { out.push(['NOT CONNECTED (app never connected)', '-']); return; }
     var seen = dayKey(last) + ' ' + fmtTimeS(last);
     var recent = now - last <= CFG.CONNECT_MIN * 60000;
-    var st = !recent ? 'NOT CONNECTED (app deleted, phone off or no internet)'
-      : (String(r[13]) === 'OFF' ? 'PERMISSION OFF (call log not allowed)' : 'CONNECTED');
+    var st = recent ? (String(r[13]) === 'OFF' ? 'PERMISSION OFF (call log not allowed)' : 'CONNECTED')
+      : (onDuty_(now, shiftFromRow(r.map(String)))
+        ? 'NOT CONNECTED (app deleted, phone off or no internet)'
+        : 'OFF DUTY (not expected to sync now)');
     out.push([st, seen]);
   });
   var kr = c.getRange(2, 11, n, 2);
@@ -383,6 +392,7 @@ function refreshConnection_() {
     SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('PERMISSION').setBackground('#fce5cd').setFontColor('#b45f06').setRanges([col]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('CONNECTED').setBackground('#d9ead3').setFontColor('#274e13').setRanges([col]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('INACTIVE').setBackground('#d9d9d9').setFontColor('#666666').setRanges([col]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('OFF DUTY').setBackground('#fff2cc').setFontColor('#7f6000').setRanges([col]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Inactive').setBackground('#d9d9d9').setFontColor('#666666').setRanges([c.getRange(2, 9, 200, 1)]).build()
   ]);
 }
